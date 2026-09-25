@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Tripwire — Live Session Monitor</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131722; --border: #232838;
+    --text: #e6e9f0; --muted: #8a91a8;
+    --accent: #ff2d78; --ok: #2dd4bf; --warn: #ff2d78;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: 1fr; gap: 12px; max-width: 720px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+    display: flex; justify-content: space-between; align-items: center;
+    animation: in .25s ease;
+  }
+  .card.trigger { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  @keyframes in { from { opacity: 0; transform: translateY(-6px);} to { opacity:1; transform:none; } }
+  .tool { font-weight: 600; font-size: 14px; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .badge {
+    font-size: 11px; padding: 3px 8px; border-radius: 999px;
+    background: rgba(255,45,120,0.15); color: var(--accent); font-weight: 600;
+  }
+  .badge.ok { background: rgba(45,212,191,0.15); color: var(--ok); }
+  #status { font-size: 12px; color: var(--muted); }
+  #empty { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>🪤 Tripwire — Live Session Monitor</h1>
+  <div class="sub" id="status">connecting…</div>
+  <div class="grid" id="feed">
+    <div id="empty">Waiting for tool calls…</div>
+  </div>
+
+<script>
+const feed = document.getElementById("feed");
+const statusEl = document.getElementById("status");
+const empty = document.getElementById("empty");
+
+const es = new EventSource("/dashboard/stream");
+es.onopen = () => statusEl.textContent = "● live";
+es.onerror = () => statusEl.textContent = "○ reconnecting…";
+
+es.addEventListener("tripwire", (e) => {
+  const data = JSON.parse(e.data);
+  empty.remove();
+
+  const card = document.createElement("div");
+  const isTrigger = data.event_type === "canary_trigger";
+  card.className = "card" + (isTrigger ? " trigger" : "");
+
+  const left = document.createElement("div");
+  left.innerHTML = `
+    <div class="tool">${isTrigger ? "⚠ CANARY TRIGGERED" : data.tool_name}</div>
+    <div class="meta">session ${data.session_id.slice(0,8)} · ${new Date().toLocaleTimeString()}</div>
+  `;
+
+  const right = document.createElement("div");
+  right.className = "badge" + (isTrigger ? "" : " ok");
+  right.textContent = isTrigger ? "FROZEN" : (data.is_canary ? "canary" : "legit");
+
+  card.appendChild(left);
+  card.appendChild(right);
+  feed.prepend(card);
+});
+</script>
+</body>
+</html>

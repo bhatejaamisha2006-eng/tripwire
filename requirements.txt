@@ -1,0 +1,8 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+sse-starlette==2.1.3
+pydantic==2.9.2
+
+# Swap in the real MCP Python SDK once you're ready to point the proxy
+# at an actual MCP server instead of the mock backend:
+# mcp==1.0.0
