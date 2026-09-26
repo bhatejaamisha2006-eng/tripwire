@@ -25,6 +25,7 @@
     animation: in .25s ease;
   }
   .card.trigger { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .card.block { border-color: #fb923c; box-shadow: 0 0 0 1px #fb923c inset; }
   @keyframes in { from { opacity: 0; transform: translateY(-6px);} to { opacity:1; transform:none; } }
   .tool { font-weight: 600; font-size: 14px; }
   .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
@@ -33,6 +34,11 @@
     background: rgba(255,45,120,0.15); color: var(--accent); font-weight: 600;
   }
   .badge.ok { background: rgba(45,212,191,0.15); color: var(--ok); }
+  .badge.block { background: rgba(251,146,60,0.15); color: #fb923c; }
+  .badge.frozen { background: rgba(56,189,248,0.15); color: #38bdf8; }
+  .card.trigger { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .card.block { border-color: #fb923c; box-shadow: 0 0 0 1px #fb923c inset; }
+  .card.frozen { border-color: #38bdf8; box-shadow: 0 0 0 1px #38bdf8 inset; }
   #status { font-size: 12px; color: var(--muted); }
   #empty { color: var(--muted); font-size: 13px; }
 </style>
@@ -59,17 +65,32 @@ es.addEventListener("tripwire", (e) => {
 
   const card = document.createElement("div");
   const isTrigger = data.event_type === "canary_trigger";
-  card.className = "card" + (isTrigger ? " trigger" : "");
+  const isBlock = data.event_type === "policy_block";
+  const isFrozen = data.event_type === "frozen_block";
+  card.className = "card" + (isTrigger ? " trigger" : (isBlock ? " block" : (isFrozen ? " frozen" : "")));
 
   const left = document.createElement("div");
+  const title = isTrigger ? "⚠ CANARY TRIGGERED" : (isBlock ? `🛡 BLOCKED: ${data.tool_name}` : (isFrozen ? `❄ POST-FREEZE: ${data.tool_name}` : data.tool_name));
   left.innerHTML = `
-    <div class="tool">${isTrigger ? "⚠ CANARY TRIGGERED" : data.tool_name}</div>
+    <div class="tool">${title}</div>
     <div class="meta">session ${data.session_id.slice(0,8)} · ${new Date().toLocaleTimeString()}</div>
   `;
 
   const right = document.createElement("div");
-  right.className = "badge" + (isTrigger ? "" : " ok");
-  right.textContent = isTrigger ? "FROZEN" : (data.is_canary ? "canary" : "legit");
+  let badgeText = data.is_canary ? "canary" : "legit";
+  let badgeClass = "ok";
+  if (isTrigger) {
+    badgeText = "FROZEN";
+    badgeClass = "";
+  } else if (isBlock) {
+    badgeText = "BLOCKED";
+    badgeClass = "block";
+  } else if (isFrozen) {
+    badgeText = "POST-FREEZE";
+    badgeClass = "frozen";
+  }
+  right.className = "badge" + (badgeClass ? " " + badgeClass : "");
+  right.textContent = badgeText;
 
   card.appendChild(left);
   card.appendChild(right);

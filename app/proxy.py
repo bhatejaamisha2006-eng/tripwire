@@ -22,10 +22,9 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from . import db, canary
-from.mcp_client import MCPBackend
+from . import db, canary, policy
+from .mcp_client import MCPBackend
 
-app = FastAPI(title="Tripwire")
 mcp_backend = MCPBackend()
 
 
@@ -48,22 +47,6 @@ _subscribers: list[asyncio.Queue] = []
 async def _broadcast(event: dict):
     for q in list(_subscribers):
         await q.put(event)
-
-
-from contextlib import asynccontextmanager
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    db.init_db()
-    await mcp_backend.connect()
-
-    yield
-
-    await mcp_backend.disconnect()
-
-
-app = FastAPI(title="Tripwire", lifespan=lifespan)
 
 
 @app.post("/mcp/session")
@@ -101,6 +84,15 @@ async def call_tool(request: Request):
     db.ensure_session(session_id)
 
     if db.is_frozen(session_id):
+        db.log_event(session_id, "frozen_block", tool_name, arguments, canary.is_canary(tool_name) if tool_name else False)
+        await _broadcast(
+            {
+                "session_id": session_id,
+                "event_type": "frozen_block",
+                "tool_name": tool_name,
+                "reason": "session frozen — flagged for suspicious behavior",
+            }
+        )
         return JSONResponse(
             status_code=423,
             content={"error": "session frozen — flagged for suspicious behavior"},
@@ -135,8 +127,24 @@ async def call_tool(request: Request):
         return {"result": canary.fake_response_for(tool_name)}
 
 
+    # Policy checkpoint for non-canary tools
+    if policy.check_policy(tool_name) == "BLOCK":
+        reason = f"tool '{tool_name}' blocked by policy"
+        db.log_event(session_id, "policy_block", tool_name, arguments, False)
+        await _broadcast(
+            {
+                "session_id": session_id,
+                "event_type": "policy_block",
+                "tool_name": tool_name,
+                "reason": reason,
+            }
+        )
+        return JSONResponse(
+            status_code=403,
+            content={"error": f"tool '{tool_name}' blocked by policy"},
+        )
+
     # Legit call — pass through to the real MCP backend.
-      # Legit call — pass through to the real MCP backend.
     result = await mcp_backend.call_tool(tool_name, arguments)
     return {"result": result}
 
