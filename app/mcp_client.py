@@ -1,10 +1,11 @@
+import sys
 from mcp import Client, StdioServerParameters
 
 
 class MCPBackend:
     def __init__(self):
         self.server = StdioServerParameters(
-            command="python",
+            command=sys.executable,
             args=["mcp_lab/server.py"],
         )
         self.client = None

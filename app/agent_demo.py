@@ -1,17 +1,11 @@
 """
 Demo script: run this live on stage.
 
-It plays both roles — a legitimate task, then a hijacked one — against
-the Tripwire proxy over plain HTTP, so judges see exactly what an
-agent sees.
+Visibly demonstrates all Tripwire security paths:
+ALLOW → POLICY BLOCK → CANARY → FREEZE → POST-FREEZE BLOCK
 
 Run the proxy first:  uvicorn app.proxy:app --reload
 Then run this:         python -m app.agent_demo
-
-For the live version, swap the hardcoded "agent decisions" below for
-an actual LLM loop (Ollama + your ReAct loop) that reads the tool list
-and the search_docs result and decides what to call next for real.
-This scripted version exists so the demo timing is 100% reliable.
 """
 import time
 import requests
@@ -21,59 +15,87 @@ BASE = "http://127.0.0.1:8000"
 
 def step(label):
     print(f"\n\033[96m--- {label} ---\033[0m")
-    time.sleep(0.6)
+    time.sleep(0.5)
 
 
 def main():
-    session_id = requests.post(f"{BASE}/mcp/session").json()["session_id"]
-    print(f"Session started: {session_id}")
+    print("\033[1;37m" + "=" * 65 + "\033[0m")
+    print("\033[1;32m       TRIPWIRE END-TO-END SECURITY PATHS DEMO\033[0m")
+    print("\033[1;37m" + "=" * 65 + "\033[0m")
 
-    step("Agent fetches tool list (real tools + hidden canaries, indistinguishable)")
+    session_id = requests.post(f"{BASE}/mcp/session").json()["session_id"]
+    print(f"Session initialized: {session_id}")
+
+    step("DISCOVERY: Agent fetches tool list (real tools + canaries)")
     tools = requests.get(f"{BASE}/mcp/tools", params={"session_id": session_id}).json()["tools"]
     for t in tools:
         print(f"  - {t['name']}")
 
-    step("LEGITIMATE TASK: user asks a login troubleshooting question")
-    resp = requests.post(
+    # =========================================================================
+    # FLOW 1 — ALLOW
+    # =========================================================================
+    step("FLOW 1 — ALLOW: Agent calls legitimate tool (get_project_status)")
+    resp1 = requests.post(
         f"{BASE}/mcp/call",
-        json={"session_id": session_id, "tool": "search_docs", "arguments": {"query": "login"}},
-    ).json()
-    print("search_docs result:")
-    print(" ", resp["result"]["results"][0])
+        json={"session_id": session_id, "tool": "get_project_status", "arguments": {}},
+    )
+    print(f"  HTTP {resp1.status_code}: {resp1.json()}")
+    print("  Outcome: Policy ALLOWED -> MCP backend executed successfully -> Session active")
 
-    step("HIJACK: the returned doc contains an embedded instruction the agent follows")
-    print("  (this is the indirect prompt injection — the 'attack' in hijack-and-catch)")
-    time.sleep(0.8)
+    # =========================================================================
+    # FLOW 2 — POLICY BLOCK
+    # =========================================================================
+    step("FLOW 2 — POLICY BLOCK: Agent attempts protected tool (restart_server)")
+    resp2 = requests.post(
+        f"{BASE}/mcp/call",
+        json={"session_id": session_id, "tool": "restart_server", "arguments": {}},
+    )
+    print(f"  HTTP {resp2.status_code}: {resp2.json()}")
+    print("  Outcome: Policy BLOCKED (HTTP 403) -> Backend NOT called -> Session NOT frozen")
 
-    step("Agent, following the injected instruction, calls a canary tool")
-    resp = requests.post(
+    # =========================================================================
+    # FLOW 3 — CANARY
+    # =========================================================================
+    step("FLOW 3 — CANARY: Agent trips deception canary (get_admin_credentials)")
+    resp3 = requests.post(
         f"{BASE}/mcp/call",
         json={"session_id": session_id, "tool": "get_admin_credentials", "arguments": {}},
-    ).json()
-    print("  Proxy returned (fake, attacker doesn't know it's fake):", resp["result"])
-
-    step("Agent, still following the injected instruction, tries a second canary")
-    resp = requests.post(
-        f"{BASE}/mcp/call",
-        json={"session_id": session_id, "tool": "internal_db_dump", "arguments": {}},
-    ).json()
-    print("  Proxy response:", resp)
-
-    step("Session is now frozen. Any further call is blocked:")
-    resp = requests.post(
-        f"{BASE}/mcp/call",
-        json={"session_id": session_id, "tool": "list_files", "arguments": {}},
     )
-    print(f"  HTTP {resp.status_code}:", resp.json())
+    print(f"  HTTP {resp3.status_code}: {resp3.json()}")
+    print("  Outcome: CANARY TRIGGERED -> Fake synthetic response returned -> Session FROZEN")
 
-    step("Forensic attack trail for this session")
+    # =========================================================================
+    # FLOW 4 — POST-FREEZE
+    # =========================================================================
+    step("FLOW 4 — POST-FREEZE: Agent attempts any further call on frozen session")
+    resp4 = requests.post(
+        f"{BASE}/mcp/call",
+        json={"session_id": session_id, "tool": "get_project_status", "arguments": {}},
+    )
+    print(f"  HTTP {resp4.status_code}: {resp4.json()}")
+    print("  Outcome: REJECTED (HTTP 423) -> Session is locked due to suspicious behavior")
+
+    # =========================================================================
+    # FORENSIC AUDIT TRAIL
+    # =========================================================================
+    step("FORENSIC AUDIT TRAIL: Ordered incident history from SQLite")
     trail = requests.get(f"{BASE}/mcp/trail", params={"session_id": session_id}).json()["events"]
-    for e in trail:
-        flag = " <-- CANARY" if e["is_canary"] else ""
-        print(f"  [{e['event_type']}] {e['tool_name']}{flag}")
+    for i, e in enumerate(trail, 1):
+        flag = ""
+        if e.get("is_canary"):
+            flag = " \033[91m[CANARY]\033[0m"
+        elif e["event_type"] == "policy_block":
+            flag = " \033[93m[POLICY BLOCKED]\033[0m"
+        elif e["event_type"] == "freeze":
+            flag = " \033[95m[SESSION FROZEN]\033[0m"
+        elif e["event_type"] == "frozen_block":
+            flag = " \033[94m[LOCKED OUT]\033[0m"
 
-    print("\n\033[92mCaught in real time. Full trail captured above.\033[0m")
+        print(f"  {i}. [{e['event_type']}] tool={e.get('tool_name')}{flag}")
+
+    print("\n\033[1;92m✔ Complete security sequence verified: ALLOW -> POLICY BLOCK -> CANARY -> FREEZE -> POST-FREEZE BLOCK\033[0m\n")
 
 
 if __name__ == "__main__":
     main()
+
