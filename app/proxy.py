@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from . import db, canary, policy, network_policy, behavior
+from . import db, canary, policy, network_policy, behavior, tool_integrity
 from .mcp_client import MCPBackend
 
 mcp_backend = MCPBackend()
@@ -42,6 +42,10 @@ app = FastAPI(title="Tripwire", lifespan=lifespan)
 
 # Broadcast queue for the dashboard's live event stream
 _subscribers: list[asyncio.Queue] = []
+
+# Tools whose metadata failed the tool-integrity scan (Scenario 7). They are
+# withheld from the agent and blocked if called.
+_quarantined_tools: set[str] = set()
 
 
 async def _broadcast(event: dict):
@@ -71,7 +75,41 @@ async def list_tools(session_id: str):
         for tool in result.tools
     ]
 
-    return {"tools": real_tools + canary.CANARY_TOOLS}
+    candidate_tools = real_tools + canary.CANARY_TOOLS
+    if tool_integrity.poisoned_tool_enabled():
+        candidate_tools = candidate_tools + [tool_integrity.POISONED_TOOL]
+
+    # Tool-integrity check (Scenario 7): scan each tool's metadata BEFORE the
+    # agent is allowed to see it. Any tool with an untrusted/malicious
+    # description is quarantined — withheld from the list and never executable.
+    safe_tools = []
+    for tool in candidate_tools:
+        if tool_integrity.is_poisoned(tool):
+            await _quarantine_tool(session_id, tool)
+        else:
+            safe_tools.append(tool)
+
+    return {"tools": safe_tools}
+
+
+async def _quarantine_tool(session_id: str, tool: dict):
+    name = tool.get("name")
+    reason = tool_integrity.poison_reason(tool)
+    _quarantined_tools.add(name)
+    db.log_event(
+        session_id, "tool_poisoning", name,
+        {"description": tool.get("description"), "reason": reason}, False,
+    )
+    await _broadcast(
+        {
+            "session_id": session_id,
+            "event_type": "tool_poisoning",
+            "tool_name": name,
+            "reason": reason,
+            "action": "TOOL QUARANTINED",
+            "severity": "HIGH",
+        }
+    )
 
 
 @app.post("/mcp/call")
@@ -97,6 +135,26 @@ async def call_tool(request: Request):
             status_code=423,
             content={"error": "session frozen — flagged for suspicious behavior"},
         )
+
+    # Tool-integrity check (Scenario 7): a tool quarantined for a poisoned
+    # description must never execute, even if the caller supplies its name
+    # directly. This is a DIFFERENT layer from canary/policy/network/behavior.
+    if tool_name in _quarantined_tools or (
+        tool_integrity.poisoned_tool_enabled() and tool_name in tool_integrity.POISONED_TOOL_NAMES
+    ):
+        reason = tool_integrity.quarantine_reason(tool_name)
+        db.log_event(session_id, "tool_poisoning", tool_name, arguments, False)
+        await _broadcast(
+            {
+                "session_id": session_id,
+                "event_type": "tool_poisoning",
+                "tool_name": tool_name,
+                "reason": reason,
+                "action": "TOOL QUARANTINED",
+                "severity": "HIGH",
+            }
+        )
+        return JSONResponse(status_code=403, content={"error": reason})
 
     is_canary_tool = canary.is_canary(tool_name)
 
@@ -220,7 +278,7 @@ def recent_events(limit: int = 200):
 # except the internal 'freeze' bookkeeping row, which is never sent live).
 _DASHBOARD_EVENT_TYPES = {
     "tool_call", "canary_trigger", "policy_block", "network_block", "frozen_block",
-    "behavior_anomaly",
+    "behavior_anomaly", "tool_poisoning",
 }
 
 

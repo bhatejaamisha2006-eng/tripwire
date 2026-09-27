@@ -38,11 +38,13 @@
   .badge.frozen { background: rgba(56,189,248,0.15); color: #38bdf8; }
   .badge.network { background: rgba(168,85,247,0.15); color: #a855f7; }
   .badge.anomaly { background: rgba(244,63,94,0.18); color: #f43f5e; }
+  .badge.poison { background: rgba(132,204,22,0.16); color: #84cc16; }
   .card.trigger { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
   .card.block { border-color: #fb923c; box-shadow: 0 0 0 1px #fb923c inset; }
   .card.frozen { border-color: #38bdf8; box-shadow: 0 0 0 1px #38bdf8 inset; }
   .card.network { border-color: #a855f7; box-shadow: 0 0 0 1px #a855f7 inset; }
   .card.anomaly { border-color: #f43f5e; box-shadow: 0 0 0 1px #f43f5e inset; }
+  .card.poison { border-color: #84cc16; box-shadow: 0 0 0 1px #84cc16 inset; }
   #status { font-size: 12px; color: var(--muted); }
   #empty { color: var(--muted); font-size: 13px; }
 </style>
@@ -73,21 +75,27 @@ es.addEventListener("tripwire", (e) => {
   const isFrozen = data.event_type === "frozen_block";
   const isNetwork = data.event_type === "network_block";
   const isAnomaly = data.event_type === "behavior_anomaly";
-  card.className = "card" + (isTrigger ? " trigger" : (isBlock ? " block" : (isFrozen ? " frozen" : (isNetwork ? " network" : (isAnomaly ? " anomaly" : "")))));
+  const isPoison = data.event_type === "tool_poisoning";
+  card.className = "card" + (isTrigger ? " trigger" : (isBlock ? " block" : (isFrozen ? " frozen" : (isNetwork ? " network" : (isAnomaly ? " anomaly" : (isPoison ? " poison" : ""))))));
 
   const left = document.createElement("div");
   const title = isTrigger ? "⚠ CANARY TRIGGERED"
     : (isBlock ? `🛡 BLOCKED: ${data.tool_name}`
     : (isFrozen ? `❄ POST-FREEZE: ${data.tool_name}`
     : (isNetwork ? `🌐 NETWORK POLICY VIOLATION: ${data.tool_name}`
-    : (isAnomaly ? `🧠 BEHAVIORAL ANOMALY: ${data.tool_name}` : data.tool_name))));
+    : (isAnomaly ? `🧠 BEHAVIORAL ANOMALY: ${data.tool_name}`
+    : (isPoison ? `☣ TOOL POISONING DETECTED: ${data.tool_name}` : data.tool_name)))));
   const detail = isNetwork && data.destination ? ` → ${data.destination}` : "";
   const anomalyLine = isAnomaly
     ? `<div class="meta">Suspicious tool sequence · Risk: ${data.severity || "HIGH"} · RISK SCORE: ${data.risk_score} · SESSION FROZEN</div>`
     : "";
+  const poisonLine = isPoison
+    ? `<div class="meta">Reason: untrusted/malicious tool description · Action: ${data.action || "TOOL QUARANTINED"}</div>`
+    : "";
   left.innerHTML = `
     <div class="tool">${title}${detail}</div>
     ${anomalyLine}
+    ${poisonLine}
     <div class="meta">session ${data.session_id.slice(0,8)} · ${new Date().toLocaleTimeString()}</div>
   `;
 
@@ -109,6 +117,9 @@ es.addEventListener("tripwire", (e) => {
   } else if (isAnomaly) {
     badgeText = "FROZEN";
     badgeClass = "anomaly";
+  } else if (isPoison) {
+    badgeText = "QUARANTINED";
+    badgeClass = "poison";
   }
   right.className = "badge" + (badgeClass ? " " + badgeClass : "");
   right.textContent = badgeText;
