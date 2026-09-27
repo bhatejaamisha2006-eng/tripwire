@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from . import db, canary, policy, network_policy
+from . import db, canary, policy, network_policy, behavior
 from .mcp_client import MCPBackend
 
 mcp_backend = MCPBackend()
@@ -175,6 +175,30 @@ async def call_tool(request: Request):
             content={"error": reason},
         )
 
+    # Behavioral anomaly detection (Scenario 6). A DIFFERENT layer from canary
+    # and policy: it scores the *sequence* of otherwise-legitimate calls and
+    # freezes the session when a sustained reconnaissance sweep pushes the risk
+    # score past the threshold. Reuses the same freeze/log/dashboard path.
+    risk_score = behavior.record(session_id, tool_name)
+    if risk_score >= behavior.RISK_THRESHOLD:
+        reason = behavior.anomaly_reason(session_id)
+        db.log_event(session_id, "behavior_anomaly", tool_name, {"risk_score": risk_score}, False)
+        db.freeze_session(session_id, reason)
+        await _broadcast(
+            {
+                "session_id": session_id,
+                "event_type": "behavior_anomaly",
+                "tool_name": tool_name,
+                "risk_score": risk_score,
+                "severity": "HIGH",
+                "reason": reason,
+            }
+        )
+        return JSONResponse(
+            status_code=423,
+            content={"error": reason, "risk_score": risk_score},
+        )
+
     # Legit call — pass through to the real MCP backend.
     result = await mcp_backend.call_tool(tool_name, arguments)
     return {"result": result}
@@ -196,6 +220,7 @@ def recent_events(limit: int = 200):
 # except the internal 'freeze' bookkeeping row, which is never sent live).
 _DASHBOARD_EVENT_TYPES = {
     "tool_call", "canary_trigger", "policy_block", "network_block", "frozen_block",
+    "behavior_anomaly",
 }
 
 
@@ -221,6 +246,9 @@ def _dashboard_history(limit: int = 100):
         }
         if event_type == "network_block":
             event["destination"] = args.get("url", "")
+        if event_type == "behavior_anomaly":
+            event["risk_score"] = args.get("risk_score", "")
+            event["severity"] = "HIGH"
         history.append(event)
     return history
 
