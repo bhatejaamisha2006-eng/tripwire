@@ -10,9 +10,20 @@ SENSITIVE_TOOLS = {
 # backend ever runs it. Scenario 3 (policy enforcement) relies on this.
 RESTRICTED_COMMAND_PATTERNS = (".env", "secrets", "credential", "id_rsa", "config/")
 
+# Tools that perform destructive/irreversible operations. An agent must not
+# take these on its own: the user's benign task never authorises them, so the
+# proxy blocks them here before the backend can act. Scenario 4 (user-intent
+# hijacking -> destructive file action) relies on this. This is the SAME
+# policy engine that Scenario 3 uses for run_command — one defense layer,
+# multiple classes of dangerous action.
+DESTRUCTIVE_TOOLS = {"delete_file"}
+
 
 def check_policy(tool_name: str, arguments: dict | None = None) -> str:
     if tool_name in SENSITIVE_TOOLS:
+        return "BLOCK"
+
+    if tool_name in DESTRUCTIVE_TOOLS:
         return "BLOCK"
 
     if tool_name == "run_command":
@@ -26,6 +37,11 @@ def check_policy(tool_name: str, arguments: dict | None = None) -> str:
 def violation_reason(tool_name: str, arguments: dict | None = None) -> str:
     """Human-readable reason for a BLOCK, used by the proxy for the logged
     event and the 403 response."""
+    if tool_name in DESTRUCTIVE_TOOLS:
+        target = (arguments or {}).get("path") or ""
+        where = f" on '{target}'" if target else ""
+        return (f"{tool_name} blocked by policy: destructive file operation{where} "
+                f"not authorized by the user task")
     if tool_name == "run_command":
         command = (arguments or {}).get("command") or ""
         return (f"run_command blocked by policy: command '{command}' attempts to "

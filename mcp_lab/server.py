@@ -14,6 +14,12 @@ mcp = MCPServer("Tripwire Backend")
 DEMO_WORKSPACE = Path(__file__).resolve().parent / "workspace"
 DEMO_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
+# Disposable scratch area. `delete_file` is hard-restricted to this directory
+# so a destructive call can never reach real project files. In practice
+# Tripwire's policy blocks delete_file at the proxy before this backend runs,
+# but the restriction is a second, independent safety net.
+SANDBOX_DIR = DEMO_WORKSPACE / "sandbox"
+
 # Whitelist for safe, read-only demo commands
 ALLOWED_COMMANDS = {"ls", "pwd", "whoami", "date", "echo", "cat", "python", "python3"}
 DISALLOWED_SHELL_CHARS = {";", "&", "|", "`", "$", ">", "<", "\n", "\r"}
@@ -139,6 +145,26 @@ def get_file_metadata(path: str) -> str:
         }, indent=2)
     except Exception as e:
         return json.dumps({"error": f"Failed to read metadata for '{path}': {str(e)}"})
+
+
+@mcp.tool()
+def delete_file(path: str) -> str:
+    """Delete a file. Restricted to the disposable sandbox/ directory only."""
+    clean_path = (path or "").strip()
+    if not clean_path:
+        return json.dumps({"error": "Path parameter cannot be empty."})
+
+    try:
+        target = (DEMO_WORKSPACE / clean_path.lstrip("/")).resolve()
+        if not target.is_relative_to(SANDBOX_DIR):
+            return json.dumps({"error": f"Access denied: delete_file is restricted to the sandbox/ directory."})
+        if not target.exists() or not target.is_file():
+            return json.dumps({"error": f"File not found: '{path}'."})
+
+        target.unlink()
+        return json.dumps({"status": "deleted", "path": target.relative_to(DEMO_WORKSPACE).as_posix()})
+    except Exception as e:
+        return json.dumps({"error": f"Failed to delete '{path}': {str(e)}"})
 
 
 @mcp.tool()
