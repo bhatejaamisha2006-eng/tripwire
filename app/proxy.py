@@ -15,9 +15,11 @@ swapped for a real `mcp` SDK client without touching the trigger logic.
 """
 import asyncio
 import json
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -39,6 +41,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Tripwire", lifespan=lifespan)
+
+# Allow the Next.js judge UI (a separate origin, e.g. localhost:3000) to POST a
+# task and open the SSE stream. Local demo tool — no credentials involved.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Tracks agent runs launched via POST /run so the UI can show run status.
+_runs: dict[str, dict] = {}
 
 # Broadcast queue for the dashboard's live event stream
 _subscribers: list[asyncio.Queue] = []
@@ -327,6 +341,59 @@ async def dashboard_stream():
             _subscribers.remove(q)
 
     return EventSourceResponse(event_gen())
+
+
+@app.post("/run")
+async def run_agent_endpoint(request: Request):
+    """Judge-facing entry point. Runs the EXISTING Ollama agent against the
+    judge's task, through the EXISTING MCP client + Tripwire proxy. Returns a
+    Tripwire session id immediately; the agent runs in the background and its
+    real tool calls / security events flow through the existing event system."""
+    body = await request.json()
+    task = (body.get("task") or "").strip()
+    if not task:
+        return JSONResponse(status_code=400, content={"error": "task is required"})
+
+    # Import here so the proxy has no hard import-time dependency on Ollama.
+    from .agent_demo import run_agent, DEFAULT_MODEL
+
+    session_id = str(uuid.uuid4())
+    db.ensure_session(session_id)
+    proxy_url = str(request.base_url).rstrip("/")
+    model = body.get("model") or DEFAULT_MODEL
+    max_steps = int(body.get("max_steps") or 12)
+    think = bool(body.get("think", False))
+    _runs[session_id] = {"status": "running", "task": task, "model": model, "error": None}
+
+    def _background_run():
+        try:
+            # demo_mode stays False: normal judge interaction is fully LLM-driven.
+            run_agent(task, model=model, proxy_url=proxy_url, max_steps=max_steps,
+                      think=think, demo_mode=False, session_id=session_id)
+            _runs[session_id]["status"] = "completed"
+        except SystemExit as e:  # run_agent uses sys.exit on Ollama/proxy errors
+            _runs[session_id]["status"] = "error"
+            _runs[session_id]["error"] = str(e)
+        except Exception as e:  # noqa: BLE001 — surface any failure to the UI
+            _runs[session_id]["status"] = "error"
+            _runs[session_id]["error"] = str(e)
+
+    threading.Thread(target=_background_run, daemon=True).start()
+    return {"session_id": session_id, "model": model, "status": "running"}
+
+
+@app.get("/run/status")
+def run_status(session_id: str):
+    info = _runs.get(session_id)
+    frozen = db.is_frozen(session_id)
+    if info is None:
+        return {"session_id": session_id, "status": "unknown", "frozen": frozen}
+    return {
+        "session_id": session_id,
+        "status": info["status"],
+        "frozen": frozen,
+        "error": info.get("error"),
+    }
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

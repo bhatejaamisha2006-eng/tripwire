@@ -78,7 +78,7 @@ def _short(text, limit=400):
     return text if len(text) <= limit else text[:limit] + " …"
 
 
-def run_agent(task, model, proxy_url, max_steps, think, demo_mode=False):
+def run_agent(task, model, proxy_url, max_steps, think, demo_mode=False, session_id=None):
     llm = ollama.Client()
     try:
         llm.show(model)
@@ -89,7 +89,7 @@ def run_agent(task, model, proxy_url, max_steps, think, demo_mode=False):
 
     proxy = TripwireProxyClient(proxy_url)
     try:
-        session_id = proxy.create_session()
+        session_id = proxy.create_session(session_id)
     except requests.RequestException as e:
         sys.exit(f"Cannot reach Tripwire proxy at {proxy_url} ({e}). Start it with: uvicorn app.proxy:app")
 

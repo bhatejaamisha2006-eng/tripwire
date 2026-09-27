@@ -52,7 +52,12 @@ class TripwireProxyClient:
         self.timeout = timeout
         self.session_id = None
 
-    def create_session(self):
+    def create_session(self, session_id=None):
+        # Reuse a caller-supplied session id (e.g. one the web API already
+        # created) instead of minting a new one; otherwise ask the proxy for one.
+        if session_id:
+            self.session_id = session_id
+            return session_id
         resp = requests.post(f"{self.base_url}/mcp/session", timeout=self.timeout)
         resp.raise_for_status()
         self.session_id = resp.json()["session_id"]
