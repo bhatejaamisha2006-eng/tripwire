@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from . import db, canary, policy
+from . import db, canary, policy, network_policy
 from .mcp_client import MCPBackend
 
 mcp_backend = MCPBackend()
@@ -145,6 +145,30 @@ async def call_tool(request: Request):
             status_code=403,
             content={"error": reason},
         )
+
+    # Network / destination policy for outbound requests (SSRF-style abuse).
+    # A DIFFERENT check from the action policy above: it inspects the
+    # destination, not the action, and runs BEFORE the backend so an
+    # unauthorized request never leaves the box.
+    if tool_name == "send_http_request":
+        url = arguments.get("url", "")
+        if network_policy.check_network_policy(url) == "BLOCK":
+            reason = network_policy.violation_reason(url)
+            db.log_event(session_id, "network_block", tool_name, arguments, False)
+            await _broadcast(
+                {
+                    "session_id": session_id,
+                    "event_type": "network_block",
+                    "tool_name": tool_name,
+                    "destination": url,
+                    "reason": reason,
+                    "severity": network_policy.SEVERITY,
+                }
+            )
+            return JSONResponse(
+                status_code=403,
+                content={"error": reason},
+            )
 
     # Legit call — pass through to the real MCP backend.
     result = await mcp_backend.call_tool(tool_name, arguments)
