@@ -11,7 +11,7 @@ Content-based defenses try to recognize malicious *instructions*, which
 breaks down when attackers reword or hide them (e.g. inside a document
 the agent retrieves, not the prompt itself). Tripwire doesn't try to
 read intent — it watches *behavior*. A canary being called is unambiguous:
-no real task needs `get_admin_credentials`.
+no real task needs `export_payroll_ledger`.
 
 ## Architecture
 
