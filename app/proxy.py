@@ -192,12 +192,48 @@ def recent_events(limit: int = 200):
     return {"events": db.get_all_events(limit)}
 
 
+# Event types the live stream broadcasts to the dashboard (i.e. everything
+# except the internal 'freeze' bookkeeping row, which is never sent live).
+_DASHBOARD_EVENT_TYPES = {
+    "tool_call", "canary_trigger", "policy_block", "network_block", "frozen_block",
+}
+
+
+def _dashboard_history(limit: int = 100):
+    """Recent persisted events, oldest-first, mapped to the same shape the live
+    broadcast uses. Replayed to a subscriber on connect so a dashboard opened or
+    reloaded after events fired shows them immediately instead of staying on
+    'Waiting for tool calls…'."""
+    history = []
+    for row in reversed(db.get_all_events(limit)):
+        event_type = row["event_type"]
+        if event_type not in _DASHBOARD_EVENT_TYPES:
+            continue
+        try:
+            args = json.loads(row["arguments"]) if row["arguments"] else {}
+        except (TypeError, ValueError):
+            args = {}
+        event = {
+            "session_id": row["session_id"],
+            "event_type": event_type,
+            "tool_name": row["tool_name"],
+            "is_canary": bool(row["is_canary"]),
+        }
+        if event_type == "network_block":
+            event["destination"] = args.get("url", "")
+        history.append(event)
+    return history
+
+
 @app.get("/dashboard/stream")
 async def dashboard_stream():
     async def event_gen():
         q: asyncio.Queue = asyncio.Queue()
         _subscribers.append(q)
         try:
+            # Backfill recent history first, then stream live events.
+            for event in _dashboard_history():
+                yield {"event": "tripwire", "data": json.dumps(event)}
             while True:
                 event = await q.get()
                 yield {"event": "tripwire", "data": json.dumps(event)}
