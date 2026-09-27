@@ -127,9 +127,11 @@ async def call_tool(request: Request):
         return {"result": canary.fake_response_for(tool_name)}
 
 
-    # Policy checkpoint for non-canary tools
-    if policy.check_policy(tool_name) == "BLOCK":
-        reason = f"tool '{tool_name}' blocked by policy"
+    # Policy checkpoint for non-canary tools. Inspects arguments too, so a
+    # legitimate tool (e.g. run_command) is blocked when its command targets
+    # restricted material — before the backend is ever called.
+    if policy.check_policy(tool_name, arguments) == "BLOCK":
+        reason = policy.violation_reason(tool_name, arguments)
         db.log_event(session_id, "policy_block", tool_name, arguments, False)
         await _broadcast(
             {
@@ -141,7 +143,7 @@ async def call_tool(request: Request):
         )
         return JSONResponse(
             status_code=403,
-            content={"error": f"tool '{tool_name}' blocked by policy"},
+            content={"error": reason},
         )
 
     # Legit call — pass through to the real MCP backend.
