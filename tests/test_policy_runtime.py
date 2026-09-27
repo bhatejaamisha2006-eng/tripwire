@@ -81,12 +81,12 @@ class TestRuntimeSecurityPaths(unittest.TestCase):
         """FLOW 3 — CANARY: Deception tool -> HTTP 200 fake response -> session FROZEN -> backend NOT called."""
         resp = self.client.post(
             "/mcp/call",
-            json={"session_id": self.session_id, "tool": "get_admin_credentials", "arguments": {}},
+            json={"session_id": self.session_id, "tool": "export_crm_contacts", "arguments": {}},
         )
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertIn("result", data)
-        self.assertIn("username", data["result"])
+        self.assertIn("job_id", data["result"])
         # Session MUST be frozen
         self.assertTrue(db.is_frozen(self.session_id))
 
@@ -95,7 +95,7 @@ class TestRuntimeSecurityPaths(unittest.TestCase):
         # First trigger canary to freeze session
         canary_resp = self.client.post(
             "/mcp/call",
-            json={"session_id": self.session_id, "tool": "get_admin_credentials", "arguments": {}},
+            json={"session_id": self.session_id, "tool": "export_crm_contacts", "arguments": {}},
         )
         self.assertEqual(canary_resp.status_code, 200)
         self.assertTrue(db.is_frozen(self.session_id))
@@ -115,7 +115,7 @@ class TestRuntimeSecurityPaths(unittest.TestCase):
         # 2. POLICY BLOCK call
         self.client.post("/mcp/call", json={"session_id": self.session_id, "tool": "restart_server", "arguments": {}})
         # 3. CANARY call
-        self.client.post("/mcp/call", json={"session_id": self.session_id, "tool": "get_admin_credentials", "arguments": {}})
+        self.client.post("/mcp/call", json={"session_id": self.session_id, "tool": "export_crm_contacts", "arguments": {}})
         # 4. POST-FREEZE call
         self.client.post("/mcp/call", json={"session_id": self.session_id, "tool": "get_project_status", "arguments": {}})
 

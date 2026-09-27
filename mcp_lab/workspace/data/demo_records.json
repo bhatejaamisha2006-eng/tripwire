@@ -1,0 +1,6 @@
+{
+  "service": "Tripwire Lab Environment",
+  "version": "1.0.0",
+  "active_users": 42,
+  "status": "healthy"
+}
