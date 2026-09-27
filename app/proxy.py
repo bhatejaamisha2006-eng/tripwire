@@ -100,6 +100,35 @@ async def call_tool(request: Request):
 
     is_canary_tool = canary.is_canary(tool_name)
 
+    # Network / destination policy for outbound requests (SSRF-style abuse).
+    # This runs BEFORE the generic tool_call event is emitted so a blocked
+    # request is classified as NETWORK BLOCKED from the start and is never
+    # surfaced on the dashboard as a 'legit' tool_call. It is a DIFFERENT
+    # check from the action policy below: it inspects the destination, not the
+    # action, and runs before the backend so the request never leaves the box.
+    # (The block/allow decision itself is unchanged.)
+    if tool_name == "send_http_request":
+        url = arguments.get("url", "")
+        if network_policy.check_network_policy(url) == "BLOCK":
+            reason = network_policy.violation_reason(url)
+            db.log_event(session_id, "network_block", tool_name, arguments, False)
+            await _broadcast(
+                {
+                    "session_id": session_id,
+                    "event_type": "network_block",
+                    "tool_name": tool_name,
+                    "destination": url,
+                    "decision": "BLOCKED",
+                    "reason": reason,
+                    "security_layer": "NETWORK POLICY",
+                    "severity": network_policy.SEVERITY,
+                }
+            )
+            return JSONResponse(
+                status_code=403,
+                content={"error": reason},
+            )
+
     db.log_event(session_id, "tool_call", tool_name, arguments, is_canary_tool)
     await _broadcast(
         {
@@ -145,30 +174,6 @@ async def call_tool(request: Request):
             status_code=403,
             content={"error": reason},
         )
-
-    # Network / destination policy for outbound requests (SSRF-style abuse).
-    # A DIFFERENT check from the action policy above: it inspects the
-    # destination, not the action, and runs BEFORE the backend so an
-    # unauthorized request never leaves the box.
-    if tool_name == "send_http_request":
-        url = arguments.get("url", "")
-        if network_policy.check_network_policy(url) == "BLOCK":
-            reason = network_policy.violation_reason(url)
-            db.log_event(session_id, "network_block", tool_name, arguments, False)
-            await _broadcast(
-                {
-                    "session_id": session_id,
-                    "event_type": "network_block",
-                    "tool_name": tool_name,
-                    "destination": url,
-                    "reason": reason,
-                    "severity": network_policy.SEVERITY,
-                }
-            )
-            return JSONResponse(
-                status_code=403,
-                content={"error": reason},
-            )
 
     # Legit call — pass through to the real MCP backend.
     result = await mcp_backend.call_tool(tool_name, arguments)

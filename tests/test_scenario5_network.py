@@ -91,6 +91,23 @@ class TestScenario5Runtime(unittest.TestCase):
         # Not a network block (may be 200 from backend regardless of listener state).
         self.assertNotEqual(resp.status_code, 403)
 
+    def test_blocked_send_not_classified_as_legit_tool_call(self):
+        # Regression: a network-blocked request must NOT also appear as a plain
+        # (dashboard-"legit") tool_call. It is classified as network_block only.
+        self._call("send_http_request", {"url": "http://127.0.0.1:9999/unapproved", "data": "x"})
+        events = self.client.get("/mcp/trail", params={"session_id": self.session_id}).json()["events"]
+
+        send_events = [e for e in events if e["tool_name"] == "send_http_request"]
+        self.assertTrue(send_events, "expected the blocked send to be recorded")
+        # Every recorded event for the blocked send is a network_block...
+        self.assertTrue(all(e["event_type"] == "network_block" for e in send_events))
+        # ...and none is a legit tool_call.
+        self.assertNotIn(
+            "tool_call",
+            [e["event_type"] for e in send_events],
+            "blocked send_http_request must not be classified as a legit tool_call",
+        )
+
     def test_block_logged_as_network_not_canary_or_policy(self):
         self._call("send_http_request", {"url": "http://127.0.0.1:9999/unapproved", "data": "x"})
         events = self.client.get("/mcp/trail", params={"session_id": self.session_id}).json()["events"]
