@@ -179,6 +179,10 @@ def run_agent(task, model, proxy_url, max_steps, think, demo_mode=False, session
 
     print_trail(proxy)
 
+    # Returned so callers (e.g. the web /run endpoint) can show the agent's real
+    # final response. None when the session was frozen before it answered.
+    return final_answer
+
 
 def _demo_decoy_call(proxy):
     """

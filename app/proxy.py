@@ -363,13 +363,16 @@ async def run_agent_endpoint(request: Request):
     model = body.get("model") or DEFAULT_MODEL
     max_steps = int(body.get("max_steps") or 12)
     think = bool(body.get("think", False))
-    _runs[session_id] = {"status": "running", "task": task, "model": model, "error": None}
+    _runs[session_id] = {
+        "status": "running", "task": task, "model": model, "error": None, "response": None,
+    }
 
     def _background_run():
         try:
             # demo_mode stays False: normal judge interaction is fully LLM-driven.
-            run_agent(task, model=model, proxy_url=proxy_url, max_steps=max_steps,
-                      think=think, demo_mode=False, session_id=session_id)
+            final_answer = run_agent(task, model=model, proxy_url=proxy_url, max_steps=max_steps,
+                                     think=think, demo_mode=False, session_id=session_id)
+            _runs[session_id]["response"] = final_answer
             _runs[session_id]["status"] = "completed"
         except SystemExit as e:  # run_agent uses sys.exit on Ollama/proxy errors
             _runs[session_id]["status"] = "error"
@@ -393,6 +396,7 @@ def run_status(session_id: str):
         "status": info["status"],
         "frozen": frozen,
         "error": info.get("error"),
+        "response": info.get("response"),
     }
 
 

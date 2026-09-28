@@ -62,6 +62,7 @@ export default function Page() {
   const [filter, setFilter] = React.useState<Filter>("ALL");
   const [selected, setSelected] = React.useState<DisplayEvent | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [agentResponse, setAgentResponse] = React.useState<string | null>(null);
 
   const esRef = React.useRef<EventSource | null>(null);
   const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
@@ -83,6 +84,7 @@ export default function Page() {
     setEvents([]);
     setSelected(null);
     setError(null);
+    setAgentResponse(null);
     setRunState("running");
     idRef.current = 0;
     try {
@@ -120,6 +122,7 @@ export default function Page() {
           const s = await r.json();
           if (s.status === "completed") {
             setRunState("completed");
+            setAgentResponse(typeof s.response === "string" ? s.response : null);
             cleanup();
           } else if (s.status === "error") {
             setRunState("error");
@@ -212,6 +215,7 @@ export default function Page() {
             </CardContent>
           </Card>
 
+          <AgentResponse text={agentResponse} runState={runState} />
           <LatestDecision event={latestSecurity} />
           <Timeline latest={events[events.length - 1] || null} status={status} />
         </div>
@@ -325,6 +329,32 @@ function Overview({ counters }: { counters: ReturnType<typeof computeCounters> }
         </Card>
       ))}
     </div>
+  );
+}
+
+function AgentResponse({ text, runState }: { text: string | null; runState: RunState }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Agent Response</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {runState === "running" ? (
+          <p className="text-sm text-slate-500">Agent is working…</p>
+        ) : text ? (
+          <p className="whitespace-pre-wrap text-sm text-slate-200">{text}</p>
+        ) : runState === "completed" ? (
+          <p className="text-sm text-slate-500">
+            The agent finished without a final text response (e.g. the session was
+            frozen or blocked before it answered).
+          </p>
+        ) : (
+          <p className="text-sm text-slate-500">
+            The agent&apos;s final response will appear here after a run.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
