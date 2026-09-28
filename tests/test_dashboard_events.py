@@ -12,7 +12,6 @@ proxy broadcasts so the UI never has to infer a decision:
 """
 import asyncio
 import json
-import threading
 import time
 import unittest
 from unittest import mock

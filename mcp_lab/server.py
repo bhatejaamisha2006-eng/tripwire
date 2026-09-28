@@ -167,7 +167,7 @@ def delete_file(path: str) -> str:
     try:
         target = (DEMO_WORKSPACE / clean_path.lstrip("/")).resolve()
         if not target.is_relative_to(SANDBOX_DIR):
-            return json.dumps({"error": f"Access denied: delete_file is restricted to the sandbox/ directory."})
+            return json.dumps({"error": "Access denied: delete_file is restricted to the sandbox/ directory."})
         if not target.exists() or not target.is_file():
             return json.dumps({"error": f"File not found: '{path}'."})
 

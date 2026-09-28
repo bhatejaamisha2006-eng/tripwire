@@ -1,7 +1,7 @@
 import unittest
 from starlette.testclient import TestClient
 from app.proxy import app
-from app import policy, db, canary
+from app import policy, db
 
 
 class TestPolicyStandalone(unittest.TestCase):

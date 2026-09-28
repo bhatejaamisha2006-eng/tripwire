@@ -34,7 +34,7 @@ from .mcp_client import TripwireProxyClient
 # Reuse Scenario 1's helpers so there is exactly one copy of this logic.
 from .agent_demo import (
     to_ollama_tools, _short, print_trail, SYSTEM_PROMPT,
-    CYAN, YELLOW, RED, MAGENTA, BLUE, GREEN, DIM, BOLD, RESET,
+    CYAN, YELLOW, MAGENTA, BLUE, GREEN, DIM, BOLD, RESET,
 )
 
 DEFAULT_MODEL = os.environ.get("TRIPWIRE_MODEL", "qwen3:4b-instruct-2507-q4_K_M")

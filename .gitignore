@@ -1,7 +1,29 @@
+# Python
 .venv/
+venv/
 __pycache__/
 *.pyc
-.env
-.DS_Store
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.vercel/
+
+# Local runtime state (SQLite forensic log, Scenario 7 flag file)
 data/*.db
 data/poisoned_tool.enabled
+
+# Environment files — never commit real configuration or secrets
+.env
+.env.*
+!.env.example
+
+# Logs, editors, OS files
+*.log
+!mcp_lab/workspace/logs/*.log
+.idea/
+.vscode/
+.DS_Store
