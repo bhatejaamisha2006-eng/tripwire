@@ -108,7 +108,11 @@ def _short(text, limit=400):
 
 
 def run_agent(task, model, proxy_url, max_steps, think, demo_mode=False, session_id=None,
-              num_ctx=DEFAULT_NUM_CTX):
+              num_ctx=DEFAULT_NUM_CTX, on_event=None):
+    """Run the agent loop. `on_event(event_type, **fields)`, if given, is told
+    when the model starts deciding a step and what it decided, so a caller
+    (the web /run endpoint) can show that the model is working."""
+    emit = on_event or (lambda *_a, **_k: None)
     llm = ollama.Client()
     try:
         llm.show(model)
@@ -147,10 +151,16 @@ def run_agent(task, model, proxy_url, max_steps, think, demo_mode=False, session
     final_answer = None
     poisoned_doc_read = False
     for step in range(1, max_steps + 1):
+        emit("agent_thinking", step=step, max_steps=max_steps, model=model)
         response = llm.chat(model=model, messages=messages, tools=tools, think=think,
                             options={"num_ctx": num_ctx})
         msg = response.message
         messages.append(msg)
+        emit("agent_decided", step=step,
+             tool_calls=[c.function.name for c in (msg.tool_calls or [])],
+             final=not msg.tool_calls,
+             generated_tokens=getattr(response, "eval_count", None),
+             model_seconds=round((getattr(response, "total_duration", None) or 0) / 1e9, 1))
 
         used = (response.prompt_eval_count or 0) + (response.eval_count or 0)
         if used >= 0.9 * num_ctx:

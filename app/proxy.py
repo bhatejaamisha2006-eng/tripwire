@@ -18,6 +18,7 @@ import hmac
 import json
 import os
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -26,7 +27,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from . import db, canary, policy, network_policy, behavior, tool_integrity
+from . import db, canary, policy, network_policy, behavior, tool_integrity, redact
 from .mcp_client import MCPBackend
 
 mcp_backend = MCPBackend()
@@ -112,20 +113,53 @@ async def _quarantine_tool(session_id: str, tool: dict):
     name = tool.get("name")
     reason = tool_integrity.poison_reason(tool)
     _quarantined_tools.add(name)
-    db.log_event(
-        session_id, "tool_poisoning", name,
-        {"description": tool.get("description"), "reason": reason}, False,
+    # Raised at tool-list time, before the agent sees the tool: no call_id.
+    await _emit(
+        session_id, "tool_poisoning", name, None,
+        log_arguments={"description": tool.get("description"), "reason": reason},
+        checks=[{"layer": "Tool Integrity", "verdict": "block"}],
+        stage="tool_discovery", reason=reason, action="TOOL QUARANTINED", severity="HIGH",
     )
-    await _broadcast(
-        {
-            "session_id": session_id,
-            "event_type": "tool_poisoning",
-            "tool_name": name,
-            "reason": reason,
-            "action": "TOOL QUARANTINED",
-            "severity": "HIGH",
-        }
-    )
+
+
+async def _emit(session_id, event_type, tool_name=None, arguments=None, *, is_canary=False,
+                log_arguments=None, persist=True, freeze_reason=None, **fields):
+    """Log an event (unless persist=False) and broadcast it to the dashboard.
+
+    The broadcast carries the persisted row's id and timestamp, so a replayed
+    history row and its live broadcast are the same event, and redacted copies
+    of any argument/reason text (the SQLite trail keeps the raw values).
+
+    freeze_reason freezes the session right after logging and BEFORE the first
+    await, so no concurrent call can slip past the frozen check meanwhile."""
+    if persist:
+        event_id, ts = db.log_event(
+            session_id, event_type, tool_name,
+            arguments if log_arguments is None else log_arguments, is_canary,
+        )
+    else:
+        event_id, ts = f"live-{uuid.uuid4().hex}", time.time()
+    if freeze_reason:
+        db.freeze_session(session_id, freeze_reason)
+    event = {
+        "event_id": event_id,
+        "ts": ts,
+        "session_id": session_id,
+        "event_type": event_type,
+        "tool_name": tool_name,
+        "is_canary": bool(is_canary),
+    }
+    if arguments is not None:
+        event["arguments"] = redact.redact(arguments)
+    if "reason" in fields:
+        fields["reason"] = redact.redact_text(fields["reason"])
+    event.update(fields)
+    await _broadcast(event)
+    return event
+
+
+def _risk(session_id):
+    return {"risk_score": behavior.score(session_id), "risk_threshold": behavior.RISK_THRESHOLD}
 
 
 @app.post("/mcp/call")
@@ -137,20 +171,21 @@ async def call_tool(request: Request):
 
     db.ensure_session(session_id)
 
+    # Every event for this one call shares a call_id, and each decision event
+    # carries `checks`: the layers this call was actually evaluated against, in
+    # order, with each verdict. The dashboard replays that trace; it does not
+    # infer or decide anything itself.
+    call_id = uuid.uuid4().hex
+    checks: list[dict] = []
+
     if db.is_frozen(session_id):
-        db.log_event(session_id, "frozen_block", tool_name, arguments, canary.is_canary(tool_name) if tool_name else False)
-        await _broadcast(
-            {
-                "session_id": session_id,
-                "event_type": "frozen_block",
-                "tool_name": tool_name,
-                "reason": "session frozen — flagged for suspicious behavior",
-            }
-        )
-        return JSONResponse(
-            status_code=423,
-            content={"error": "session frozen — flagged for suspicious behavior"},
-        )
+        reason = "session frozen — flagged for suspicious behavior"
+        checks.append({"layer": "Session Freeze", "verdict": "block"})
+        await _emit(session_id, "frozen_block", tool_name, arguments,
+                    is_canary=canary.is_canary(tool_name) if tool_name else False,
+                    call_id=call_id, checks=checks, reason=reason, **_risk(session_id))
+        return JSONResponse(status_code=423, content={"error": reason})
+    checks.append({"layer": "Session Freeze", "verdict": "pass"})
 
     # Tool-integrity check (Scenario 7): a tool quarantined for a poisoned
     # description must never execute, even if the caller supplies its name
@@ -159,18 +194,12 @@ async def call_tool(request: Request):
         tool_integrity.poisoned_tool_enabled() and tool_name in tool_integrity.POISONED_TOOL_NAMES
     ):
         reason = tool_integrity.quarantine_reason(tool_name)
-        db.log_event(session_id, "tool_poisoning", tool_name, arguments, False)
-        await _broadcast(
-            {
-                "session_id": session_id,
-                "event_type": "tool_poisoning",
-                "tool_name": tool_name,
-                "reason": reason,
-                "action": "TOOL QUARANTINED",
-                "severity": "HIGH",
-            }
-        )
+        checks.append({"layer": "Tool Integrity", "verdict": "block"})
+        await _emit(session_id, "tool_poisoning", tool_name, arguments,
+                    call_id=call_id, checks=checks, reason=reason,
+                    action="TOOL QUARANTINED", severity="HIGH", **_risk(session_id))
         return JSONResponse(status_code=403, content={"error": reason})
+    checks.append({"layer": "Tool Integrity", "verdict": "pass"})
 
     is_canary_tool = canary.is_canary(tool_name)
 
@@ -185,78 +214,56 @@ async def call_tool(request: Request):
         url = arguments.get("url", "")
         if network_policy.check_network_policy(url) == "BLOCK":
             reason = network_policy.violation_reason(url)
-            db.log_event(session_id, "network_block", tool_name, arguments, False)
-            await _broadcast(
-                {
-                    "session_id": session_id,
-                    "event_type": "network_block",
-                    "tool_name": tool_name,
-                    "destination": url,
-                    "decision": "BLOCKED",
-                    "reason": reason,
-                    "security_layer": "NETWORK POLICY",
-                    "severity": network_policy.SEVERITY,
-                }
-            )
+            checks.append({"layer": "Network Policy", "verdict": "block"})
+            await _emit(session_id, "network_block", tool_name, arguments,
+                        call_id=call_id, checks=checks, destination=redact.redact_text(url),
+                        decision="BLOCKED", reason=reason, security_layer="NETWORK POLICY",
+                        severity=network_policy.SEVERITY, **_risk(session_id))
             return JSONResponse(
                 status_code=403,
                 content={"error": reason},
             )
+        checks.append({"layer": "Network Policy", "verdict": "pass"})
+    else:
+        checks.append({"layer": "Network Policy", "verdict": "n/a"})
 
-    db.log_event(session_id, "tool_call", tool_name, arguments, is_canary_tool)
-    await _broadcast(
-        {
-            "session_id": session_id,
-            "event_type": "tool_call",
-            "tool_name": tool_name,
-            "arguments": arguments,
-            "is_canary": is_canary_tool,
-        }
-    )
+    await _emit(session_id, "tool_call", tool_name, arguments, is_canary=is_canary_tool,
+                call_id=call_id, checks=list(checks))
 
     if is_canary_tool:
         reason = f"canary tool '{tool_name}' was called"
-        db.log_event(session_id, "canary_trigger", tool_name, arguments, True)
-        db.freeze_session(session_id, reason)
-        await _broadcast(
-            {
-                "session_id": session_id,
-                "event_type": "canary_trigger",
-                "tool_name": tool_name,
-                "reason": reason,
-            }
-        )
+        checks.append({"layer": "Canary", "verdict": "trigger"})
+        await _emit(session_id, "canary_trigger", tool_name, arguments, is_canary=True,
+                    freeze_reason=reason, call_id=call_id, checks=checks, reason=reason,
+                    **_risk(session_id))
         # Fake success — don't tip off the caller that it's been caught.
         return {"result": canary.fake_response_for(tool_name)}
-
+    checks.append({"layer": "Canary", "verdict": "pass"})
 
     # Policy checkpoint for non-canary tools. Inspects arguments too, so a
     # legitimate tool (e.g. run_command) is blocked when its command targets
     # restricted material — before the backend is ever called.
     if policy.check_policy(tool_name, arguments) == "BLOCK":
         reason = policy.violation_reason(tool_name, arguments)
-        db.log_event(session_id, "policy_block", tool_name, arguments, False)
-        await _broadcast(
-            {
-                "session_id": session_id,
-                "event_type": "policy_block",
-                "tool_name": tool_name,
-                "reason": reason,
-            }
-        )
+        checks.append({"layer": "Action Policy", "verdict": "block"})
         # The blocked attempt is still behavior. A recon call that reaches for
         # restricted secrets is the payoff of a credential-harvesting sweep, so
         # the behavioral layer scores it independently and may freeze the
         # session on top of the policy block. Other policy blocks (destructive
         # or sensitive tools) are not recon and are left to policy alone.
+        risk_score = None
         if tool_name in behavior.RECON_TOOLS and policy.targets_restricted_material(tool_name, arguments):
             risk_score = behavior.record(session_id, tool_name, restricted=True)
-            if risk_score >= behavior.RISK_THRESHOLD:
-                return await _behavior_freeze(session_id, tool_name, risk_score)
+        await _emit(session_id, "policy_block", tool_name, arguments,
+                    call_id=call_id, checks=list(checks), reason=reason, **_risk(session_id))
+        if risk_score is not None and risk_score >= behavior.RISK_THRESHOLD:
+            checks.append({"layer": "Behavioral", "verdict": "freeze", "risk_score": risk_score})
+            return await _behavior_freeze(session_id, tool_name, risk_score, call_id, checks)
         return JSONResponse(
             status_code=403,
             content={"error": reason},
         )
+    checks.append({"layer": "Action Policy", "verdict": "pass"})
 
     # Behavioral anomaly detection (Scenario 6). A DIFFERENT layer from canary
     # and policy: it scores the *sequence* of otherwise-legitimate calls and
@@ -264,7 +271,9 @@ async def call_tool(request: Request):
     # score past the threshold. Reuses the same freeze/log/dashboard path.
     risk_score = behavior.record(session_id, tool_name)
     if risk_score >= behavior.RISK_THRESHOLD:
-        return await _behavior_freeze(session_id, tool_name, risk_score)
+        checks.append({"layer": "Behavioral", "verdict": "freeze", "risk_score": risk_score})
+        return await _behavior_freeze(session_id, tool_name, risk_score, call_id, checks)
+    checks.append({"layer": "Behavioral", "verdict": "pass", "risk_score": risk_score})
 
     # Legit call — pass through to the real MCP backend.
     result = await mcp_backend.call_tool(tool_name, arguments)
@@ -273,34 +282,19 @@ async def call_tool(request: Request):
     # (emitted before the canary/policy/behavior checks run), so the dashboard
     # must not treat it as "allowed"; this event is emitted only once a call
     # has passed every layer and the backend actually executed it.
-    db.log_event(session_id, "tool_allowed", tool_name, arguments, False)
-    await _broadcast(
-        {
-            "session_id": session_id,
-            "event_type": "tool_allowed",
-            "tool_name": tool_name,
-            "arguments": arguments,
-            "decision": "ALLOWED",
-        }
-    )
+    await _emit(session_id, "tool_allowed", tool_name, arguments,
+                call_id=call_id, checks=checks, decision="ALLOWED", **_risk(session_id))
     return {"result": result}
 
 
-
-async def _behavior_freeze(session_id: str, tool_name: str, risk_score: int):
+async def _behavior_freeze(session_id: str, tool_name: str, risk_score: int,
+                           call_id: str | None = None, checks: list | None = None):
     reason = behavior.anomaly_reason(session_id)
-    db.log_event(session_id, "behavior_anomaly", tool_name, {"risk_score": risk_score}, False)
-    db.freeze_session(session_id, reason)
-    await _broadcast(
-        {
-            "session_id": session_id,
-            "event_type": "behavior_anomaly",
-            "tool_name": tool_name,
-            "risk_score": risk_score,
-            "severity": "HIGH",
-            "reason": reason,
-        }
-    )
+    await _emit(session_id, "behavior_anomaly", tool_name, None,
+                log_arguments={"risk_score": risk_score}, freeze_reason=reason,
+                call_id=call_id, checks=checks or [],
+                risk_score=risk_score, risk_threshold=behavior.RISK_THRESHOLD,
+                severity="HIGH", reason=reason)
     return JSONResponse(
         status_code=423,
         content={"error": reason, "risk_score": risk_score},
@@ -323,6 +317,7 @@ def recent_events(limit: int = 200):
 _DASHBOARD_EVENT_TYPES = {
     "tool_call", "tool_allowed", "canary_trigger", "policy_block", "network_block",
     "frozen_block", "behavior_anomaly", "tool_poisoning",
+    "session_started", "session_completed",
 }
 
 
@@ -341,13 +336,23 @@ def _dashboard_history(limit: int = 100):
         except (TypeError, ValueError):
             args = {}
         event = {
+            "event_id": row["id"],
+            "ts": row["ts"],
             "session_id": row["session_id"],
             "event_type": event_type,
             "tool_name": row["tool_name"],
             "is_canary": bool(row["is_canary"]),
+            # Per-call check traces are live-only; replayed rows have none.
+            "replayed": True,
         }
+        if event_type in ("session_started", "session_completed"):
+            event.update(redact.redact(args))
+        elif event_type == "tool_poisoning" and "reason" in args:
+            event["reason"] = redact.redact_text(args["reason"])
+        elif event_type != "behavior_anomaly":
+            event["arguments"] = redact.redact(args)
         if event_type == "network_block":
-            event["destination"] = args.get("url", "")
+            event["destination"] = redact.redact_text(args.get("url", ""))
         if event_type == "behavior_anomaly":
             event["risk_score"] = args.get("risk_score", "")
             event["severity"] = "HIGH"
@@ -415,13 +420,29 @@ async def run_agent_endpoint(request: Request):
     think = bool(body.get("think", False))
     _runs[session_id] = {
         "status": "running", "task": task, "model": model, "error": None, "response": None,
+        "started_at": time.time(),
     }
+    await _emit(session_id, "session_started", None, None,
+                log_arguments={"model": model, "max_steps": max_steps},
+                model=model, max_steps=max_steps)
+
+    loop = asyncio.get_running_loop()
+
+    def _from_thread(coro):
+        # The agent runs in a worker thread; broadcasts belong on the event loop.
+        return asyncio.run_coroutine_threadsafe(coro, loop)
+
+    def _agent_event(event_type, **fields):
+        # Agent-runtime progress (model thinking / decided), not a security
+        # event: live-only, never written to the forensic trail.
+        _from_thread(_emit(session_id, event_type, None, None, persist=False, **fields))
 
     def _background_run():
         try:
             # demo_mode stays False: normal judge interaction is fully LLM-driven.
             final_answer = run_agent(task, model=model, proxy_url=proxy_url, max_steps=max_steps,
-                                     think=think, demo_mode=False, session_id=session_id)
+                                     think=think, demo_mode=False, session_id=session_id,
+                                     on_event=_agent_event)
             _runs[session_id]["response"] = final_answer
             _runs[session_id]["status"] = "completed"
         except SystemExit as e:  # run_agent uses sys.exit on Ollama/proxy errors
@@ -430,6 +451,13 @@ async def run_agent_endpoint(request: Request):
         except Exception as e:  # noqa: BLE001 — surface any failure to the UI
             _runs[session_id]["status"] = "error"
             _runs[session_id]["error"] = str(e)
+        info = _runs[session_id]
+        outcome = ("error" if info["status"] == "error"
+                   else "frozen" if db.is_frozen(session_id) else "completed")
+        summary = {"outcome": outcome,
+                   "duration_seconds": round(time.time() - info["started_at"], 1)}
+        _from_thread(_emit(session_id, "session_completed", None, None,
+                           log_arguments=summary, **summary))
 
     threading.Thread(target=_background_run, daemon=True).start()
     return {"session_id": session_id, "model": model, "status": "running"}
@@ -445,15 +473,22 @@ def run_status(session_id: str):
         "session_id": session_id,
         "status": info["status"],
         "frozen": frozen,
-        "error": info.get("error"),
-        "response": info.get("response"),
+        # The agent's answer may quote files it read; never show raw secrets.
+        "error": redact.redact_text(info.get("error")),
+        "response": redact.redact_text(info.get("response"), limit=None),
     }
 
 
 @app.get("/healthz")
 def healthz():
-    """Liveness for the hosting platform's health check."""
-    return {"status": "ok"}
+    """Liveness for the hosting platform's health check. Also reports whether
+    the Scenario 7 poisoned tool is enabled, so the UI can say so truthfully."""
+    return {
+        "status": "ok",
+        "poisoned_tool_enabled": tool_integrity.poisoned_tool_enabled(),
+        # Whether /run needs an access code — lets the UI hide the field otherwise.
+        "access_key_required": bool(os.environ.get("TRIPWIRE_ACCESS_KEY")),
+    }
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

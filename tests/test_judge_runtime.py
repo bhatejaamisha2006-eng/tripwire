@@ -162,7 +162,13 @@ class TestRunEndpointHosting(unittest.TestCase):
         self.assertEqual(self.calls[0]["proxy_url"], "http://127.0.0.1:9123")
 
     def test_healthz(self):
-        self.assertEqual(self.client.get("/healthz").json(), {"status": "ok"})
+        body = self.client.get("/healthz").json()
+        self.assertEqual(body["status"], "ok")
+        self.assertIsInstance(body["poisoned_tool_enabled"], bool)
+        with mock.patch.dict("os.environ", {"TRIPWIRE_ACCESS_KEY": "x"}):
+            self.assertTrue(self.client.get("/healthz").json()["access_key_required"])
+        with mock.patch.dict("os.environ", {"TRIPWIRE_ACCESS_KEY": ""}):
+            self.assertFalse(self.client.get("/healthz").json()["access_key_required"])
 
 
 if __name__ == "__main__":

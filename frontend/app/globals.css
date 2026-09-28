@@ -2,26 +2,144 @@
 @tailwind components;
 @tailwind utilities;
 
+/* State colors — color encodes state, never decoration. */
 :root {
   color-scheme: dark;
+  --tw-bg: #05080d;
+  --tw-ok: #34d399;
+  --tw-plan: #fbbf24;
+  --tw-proc: #22d3ee;
+  --tw-threat: #fb7185;
+  --tw-behavior: #9085e9;
+  --tw-poison: #e879f9;
+  --tw-idle: #334155;
 }
 
 html,
 body {
-  background-color: #0a0d12;
+  background-color: var(--tw-bg);
   color: #e6e9f0;
   -webkit-font-smoothing: antialiased;
 }
 
+body {
+  background-image:
+    radial-gradient(ellipse 70% 45% at 50% -5%, rgba(34, 211, 238, 0.07), transparent 65%),
+    radial-gradient(ellipse 50% 40% at 100% 100%, rgba(144, 133, 233, 0.05), transparent 70%),
+    linear-gradient(rgba(148, 163, 184, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.03) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 28px 28px, 28px 28px;
+  background-attachment: fixed;
+}
+
 * {
-  border-color: #1e2632;
+  border-color: #1a2331;
 }
 
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #232c3a;
+  background: #1f2937;
   border-radius: 999px;
+}
+
+/* Glass panel. */
+.tw-panel {
+  background: linear-gradient(180deg, rgba(15, 21, 31, 0.86), rgba(9, 13, 20, 0.86));
+  border: 1px solid #1a2331;
+  border-radius: 16px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 30px -18px rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(6px);
+}
+
+.tw-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #7c8699;
+}
+
+/* ---------------------------------------------------------------- motion */
+
+/* Node glow in its state color (set via --c). */
+@keyframes tw-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 55%, transparent), 0 0 18px -4px var(--c); }
+  60% { box-shadow: 0 0 0 9px color-mix(in srgb, var(--c) 0%, transparent), 0 0 26px -2px var(--c); }
+}
+.tw-pulse { animation: tw-pulse 1.6s ease-out infinite; }
+
+/* Threat: a sharper, slower throb. */
+@keyframes tw-threat {
+  0%, 100% { box-shadow: 0 0 0 1px var(--c), 0 0 22px -6px var(--c); }
+  50% { box-shadow: 0 0 0 2px var(--c), 0 0 34px -2px var(--c); }
+}
+.tw-threat { animation: tw-threat 1.8s ease-in-out infinite; }
+
+/* Flowing connector between stages (color via --c). */
+@keyframes tw-flow {
+  from { background-position: 0 0; }
+  to { background-position: 0 14px; }
+}
+.tw-flow {
+  background-image: linear-gradient(to bottom, var(--c) 45%, transparent 45%);
+  background-size: 2px 7px;
+  animation: tw-flow 0.5s linear infinite;
+}
+
+/* The tool-call packet riding the spine. */
+.tw-packet { transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.3s ease, background-color 0.3s ease; }
+@keyframes tw-bob {
+  0%, 100% { filter: drop-shadow(0 0 6px var(--c)); }
+  50% { filter: drop-shadow(0 0 14px var(--c)); }
+}
+.tw-bob { animation: tw-bob 1.4s ease-in-out infinite; }
+
+/* Indeterminate activity bar — shows work without faking progress. */
+@keyframes tw-sweep {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(420%); }
+}
+.tw-sweep { animation: tw-sweep 1.9s cubic-bezier(0.45, 0, 0.2, 1) infinite; }
+
+/* A stage or layer that just changed state. */
+@keyframes tw-pop {
+  0% { transform: scale(0.96); filter: brightness(1.8); }
+  100% { transform: scale(1); filter: brightness(1); }
+}
+.tw-pop { animation: tw-pop 0.55s cubic-bezier(0.22, 1, 0.36, 1) 1; }
+
+@keyframes tw-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.tw-rise { animation: tw-rise 0.4s ease-out 1 both; }
+
+/* Session frozen: hazard lockdown texture. */
+@keyframes tw-hazard {
+  from { background-position: 0 0; }
+  to { background-position: 56px 0; }
+}
+.tw-lockdown {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(251, 113, 133, 0.07) 0 14px,
+    transparent 14px 28px
+  );
+  animation: tw-hazard 3s linear infinite;
+}
+
+@keyframes tw-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.tw-blink { animation: tw-blink 1.2s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tw-pulse, .tw-threat, .tw-flow, .tw-bob, .tw-sweep, .tw-pop, .tw-rise, .tw-lockdown, .tw-blink {
+    animation: none !important;
+  }
+  .tw-packet { transition: none; }
 }

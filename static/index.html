@@ -67,6 +67,8 @@ es.onerror = () => statusEl.textContent = "○ reconnecting…";
 
 es.addEventListener("tripwire", (e) => {
   const data = JSON.parse(e.data);
+  // This simple view shows tool calls only; skip session/agent lifecycle events.
+  if (/^(session|agent)_/.test(data.event_type)) return;
   empty.remove();
 
   const card = document.createElement("div");

@@ -5,68 +5,65 @@ import {
   API_BASE,
   RawEvent,
   DisplayEvent,
-  Decision,
+  Scenario,
   normalize,
-  isSecurityEvent,
-  computeCounters,
-  deriveStatus,
-  SessionStatus,
+  groupCalls,
+  finalDecision,
+  pipelineFor,
+  agentPhase,
+  sessionState,
+  layerActivity,
+  riskSeries,
+  timelineItems,
+  caughtBy,
+  THREAT_TYPES,
+  FREEZING_TYPES,
 } from "@/lib/tripwire";
-import {
-  Button,
-  Card,
-  CardHeader,
-  CardTitle,
-  CardContent,
-  Badge,
-  Input,
-  Textarea,
-  Separator,
-  Dialog,
-} from "@/components/ui";
-import { cn } from "@/lib/utils";
+import { Dialog } from "@/components/ui";
+import { StatusBar } from "@/components/status-bar";
+import { AttackConsole } from "@/components/attack-console";
+import { PipelineHero } from "@/components/pipeline-hero";
+import { ToolCallPanel } from "@/components/tool-call-panel";
+import { LayerStatus } from "@/components/layer-status";
+import { RiskChart } from "@/components/risk-chart";
+import { EventTimeline } from "@/components/event-timeline";
 
 type RunState = "idle" | "running" | "completed" | "error";
-type Filter = "ALL" | "ALLOWED" | "BLOCKED" | "SECURITY";
+type Health = { online: boolean; poisonedTool: boolean; accessKeyRequired: boolean } | null;
 
-function decisionTone(d: Decision) {
-  switch (d) {
-    case "ALLOWED":
-      return { tone: "ok" as const, symbol: "✓" };
-    case "BLOCKED":
-      return { tone: "block" as const, symbol: "✕" };
-    case "QUARANTINED":
-      return { tone: "poison" as const, symbol: "⚠" };
-    case "FROZEN":
-    case "TRIGGERED":
-      return { tone: "freeze" as const, symbol: "❄" };
-    case "LOCKED OUT":
-      return { tone: "freeze" as const, symbol: "⛔" };
-    default:
-      return { tone: "muted" as const, symbol: "•" };
-  }
-}
+const MAX_BUFFERED_SESSIONS = 20;
 
-function statusTone(s: SessionStatus) {
-  if (s === "FROZEN" || s === "QUARANTINED" || s === "BLOCKED" || s === "ERROR")
-    return "text-rose-400";
-  if (s === "RUNNING") return "text-amber-400";
-  if (s === "COMPLETED") return "text-emerald-400";
-  return "text-slate-400";
+/** Re-render every `ms` while `on` — drives the elapsed display. */
+function useTicker(on: boolean, ms = 1000) {
+  const [, setN] = React.useState(0);
+  React.useEffect(() => {
+    if (!on) return;
+    const t = setInterval(() => setN((n) => n + 1), ms);
+    return () => clearInterval(t);
+  }, [on, ms]);
 }
 
 export default function Page() {
   const [task, setTask] = React.useState("");
+  const [scenarioId, setScenarioId] = React.useState<string | null>(null);
+  const [runScenarioId, setRunScenarioId] = React.useState<string | null>(null);
   const [sessionId, setSessionId] = React.useState<string | null>(null);
   const [runState, setRunState] = React.useState<RunState>("idle");
   const [events, setEvents] = React.useState<DisplayEvent[]>([]);
-  const [filter, setFilter] = React.useState<Filter>("ALL");
   const [selected, setSelected] = React.useState<DisplayEvent | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [agentResponse, setAgentResponse] = React.useState<string | null>(null);
-  // Shared access code for a hosted backend (TRIPWIRE_ACCESS_KEY). Remembered
-  // per browser for convenience; storage may be unavailable, so guard it.
+  const [streamUp, setStreamUp] = React.useState(false);
+  const [health, setHealth] = React.useState<Health>(null);
   const [accessCode, setAccessCode] = React.useState("");
+
+  // Every session's events, buffered from the moment the page opens the
+  // stream — so events broadcast before POST /run returns are not lost.
+  const bufferRef = React.useRef(new Map<string, DisplayEvent[]>());
+  const seenRef = React.useRef(new Set<string>());
+  const sessionRef = React.useRef<string | null>(null);
+  const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+
   React.useEffect(() => {
     try {
       setAccessCode(localStorage.getItem("tripwire-access-code") || "");
@@ -83,37 +80,101 @@ export default function Page() {
     }
   };
 
-  const esRef = React.useRef<EventSource | null>(null);
-  const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
-  const idRef = React.useRef(0);
-  const sessionRef = React.useRef<string | null>(null);
-  // Reconnect de-dup: the SSE stream replays recent history on every (re)connect,
-  // so on a reconnect we skip this session's already-shown events.
-  const openCountRef = React.useRef(0);
-  const skipRef = React.useRef(0);
-  const seenCountRef = React.useRef(0);
-
-  const cleanup = React.useCallback(() => {
-    esRef.current?.close();
-    esRef.current = null;
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = null;
+  // Backend health: liveness, the S7 flag, and whether an access code is needed.
+  React.useEffect(() => {
+    let alive = true;
+    const check = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/healthz`);
+        const j = await r.json();
+        if (alive)
+          setHealth({ online: r.ok, poisonedTool: !!j.poisoned_tool_enabled, accessKeyRequired: !!j.access_key_required });
+      } catch {
+        if (alive) setHealth({ online: false, poisonedTool: false, accessKeyRequired: false });
+      }
+    };
+    check();
+    const t = setInterval(check, 30000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
   }, []);
 
-  React.useEffect(() => () => cleanup(), [cleanup]);
+  const stopPolling = () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = null;
+  };
+  React.useEffect(() => stopPolling, []);
+
+  // Completion + final answer. SSE's session_completed triggers this; polling
+  // is the fallback if the stream is down.
+  const refreshStatus = React.useCallback(async (sid: string) => {
+    try {
+      const r = await fetch(`${API_BASE}/run/status?session_id=${sid}`);
+      const s = await r.json();
+      if (sid !== sessionRef.current) return;
+      if (s.status === "completed") {
+        setRunState("completed");
+        setAgentResponse(typeof s.response === "string" ? s.response : null);
+        stopPolling();
+      } else if (s.status === "error") {
+        setRunState("error");
+        setError(s.error || "Agent error");
+        stopPolling();
+      }
+    } catch {
+      /* transient; keep polling */
+    }
+  }, []);
+
+  // One long-lived SSE subscription. The server replays recent persisted
+  // history on every (re)connect; event_id makes replays idempotent.
+  React.useEffect(() => {
+    const es = new EventSource(`${API_BASE}/dashboard/stream`);
+    es.onopen = () => setStreamUp(true);
+    es.onerror = () => setStreamUp(false); // the browser reconnects on its own
+    es.addEventListener("tripwire", (ev: MessageEvent) => {
+      let raw: RawEvent;
+      try {
+        raw = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      if (raw.event_id == null || !raw.session_id) return;
+      const id = String(raw.event_id);
+      if (seenRef.current.has(id)) return;
+      seenRef.current.add(id);
+      const e = normalize(raw);
+      const buf = bufferRef.current;
+      if (!buf.has(raw.session_id)) {
+        buf.set(raw.session_id, []);
+        if (buf.size > MAX_BUFFERED_SESSIONS) buf.delete(buf.keys().next().value as string);
+      }
+      buf.get(raw.session_id)!.push(e);
+      if (raw.session_id === sessionRef.current) {
+        setEvents((prev) => [...prev, e]);
+        if (raw.event_type === "session_completed") void refreshStatus(raw.session_id);
+      }
+    });
+    return () => es.close();
+  }, [refreshStatus]);
+
+  const selectScenario = (s: Scenario) => {
+    setScenarioId(s.id);
+    setTask(s.task);
+  };
 
   const runAgent = async () => {
     if (!task.trim() || runState === "running") return;
-    cleanup();
+    stopPolling();
+    sessionRef.current = null;
     setEvents([]);
     setSelected(null);
     setError(null);
     setAgentResponse(null);
     setRunState("running");
-    idRef.current = 0;
-    openCountRef.current = 0;
-    skipRef.current = 0;
-    seenCountRef.current = 0;
+    setRunScenarioId(scenarioId);
     try {
       const res = await fetch(`${API_BASE}/run`, {
         method: "POST",
@@ -127,379 +188,108 @@ export default function Page() {
         const detail = await res.json().catch(() => null);
         throw new Error(detail?.error || `Backend returned ${res.status}`);
       }
-      const data = await res.json();
-      const sid: string = data.session_id;
-      setSessionId(sid);
+      const sid: string = (await res.json()).session_id;
       sessionRef.current = sid;
-
-      // Live events: reuse the EXISTING global SSE stream, filtered to this run.
-      const es = new EventSource(`${API_BASE}/dashboard/stream`);
-      es.onopen = () => {
-        openCountRef.current += 1;
-        // On a reconnect, the server replays this session's history; skip the
-        // events we have already displayed so they are not shown twice.
-        if (openCountRef.current > 1) skipRef.current = seenCountRef.current;
-      };
-      es.addEventListener("tripwire", (ev: MessageEvent) => {
-        try {
-          const raw: RawEvent = JSON.parse(ev.data);
-          if (raw.session_id !== sessionRef.current) return; // only this run
-          if (skipRef.current > 0) {
-            skipRef.current -= 1; // a replayed event we already have
-            return;
-          }
-          seenCountRef.current += 1;
-          setEvents((prev) => [...prev, normalize(raw, idRef.current++)]);
-        } catch {
-          /* ignore malformed frame */
-        }
-      });
-      es.onerror = () => {
-        /* browser auto-reconnects; onopen will re-fire and de-dup */
-      };
-      esRef.current = es;
-
-      // Run status: the agent runs in the background; poll for completion.
-      pollRef.current = setInterval(async () => {
-        try {
-          const r = await fetch(`${API_BASE}/run/status?session_id=${sid}`);
-          const s = await r.json();
-          if (s.status === "completed") {
-            setRunState("completed");
-            setAgentResponse(typeof s.response === "string" ? s.response : null);
-            cleanup();
-          } else if (s.status === "error") {
-            setRunState("error");
-            setError(s.error || "Agent error");
-            cleanup();
-          }
-        } catch {
-          /* transient; keep polling */
-        }
-      }, 1500);
+      setSessionId(sid);
+      setEvents([...(bufferRef.current.get(sid) || [])]);
+      pollRef.current = setInterval(() => refreshStatus(sid), 3000);
     } catch (e: unknown) {
       setRunState("error");
       setError(e instanceof Error ? e.message : "Failed to reach backend");
-      cleanup();
     }
   };
 
-  const counters = computeCounters(events);
-  const status = deriveStatus(runState, events);
-  const latestSecurity = [...events].reverse().find(isSecurityEvent) || null;
+  // ------------------------------------------------------------ derived view
 
-  const filtered = events.filter((e) => {
-    if (filter === "ALL") return true;
-    if (filter === "ALLOWED") return e.decision === "ALLOWED";
-    if (filter === "BLOCKED")
-      return ["BLOCKED", "QUARANTINED", "LOCKED OUT"].includes(e.decision);
-    if (filter === "SECURITY") return isSecurityEvent(e);
-    return true;
-  });
+  const running = runState === "running";
+  const calls = groupCalls(events);
+  const phase = agentPhase(events, running);
+  useTicker(running && phase.state === "thinking");
+  const lastCall = calls[calls.length - 1];
+  const stages = pipelineFor(lastCall, phase);
+  const state = sessionState(runState, events);
+  const activity = layerActivity(events);
+  const risk = riskSeries(calls);
+  const items = timelineItems(events);
+  const last = finalDecision(lastCall);
+  const hotLayer =
+    last && THREAT_TYPES.has(last.type) ? (FREEZING_TYPES.has(last.type) && last.type !== "frozen_block" ? caughtBy(lastCall) : last.layer) : undefined;
+  const callNumber = calls.filter((c) => !c.discovery).length;
+  const planningMs = phase.state === "thinking" && phase.since ? Date.now() - phase.since : 0;
 
   return (
-    <main className="mx-auto max-w-[1400px] px-4 py-6 md:px-8">
-      {/* Header */}
-      <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-3">
-            <span className="text-2xl">🪤</span>
-            <h1 className="text-xl font-bold tracking-tight">TRIPWIRE</h1>
-            <span className="text-xs uppercase tracking-widest text-slate-500">
-              Autonomous Agent Security Runtime
-            </span>
+    <>
+      <StatusBar state={state} sessionId={sessionId} backendOnline={health ? health.online : null} streamLive={streamUp} />
+
+      <main className="mx-auto max-w-[1680px] px-4 pb-10 pt-5 md:px-6">
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[270px_minmax(0,1fr)_340px] 2xl:grid-cols-[300px_minmax(0,1fr)_400px]">
+          {/* LEFT — attack console */}
+          <div className="order-2 min-w-0 space-y-5 lg:order-1 xl:col-start-1 xl:row-start-1">
+            <AttackConsole
+              selectedId={scenarioId}
+              runningId={runScenarioId}
+              running={running}
+              poisonedToolEnabled={health ? health.poisonedTool : null}
+              accessKeyRequired={!!health?.accessKeyRequired}
+              task={task}
+              accessCode={accessCode}
+              error={error}
+              onSelect={selectScenario}
+              onTaskChange={(t) => {
+                setTask(t);
+                setScenarioId(null);
+              }}
+              onAccessCodeChange={updateAccessCode}
+              onRun={runAgent}
+            />
+            <AgentAnswer text={agentResponse} runState={runState} />
+          </div>
+
+          {/* CENTER — hero pipeline */}
+          <div className="order-1 min-w-0 lg:order-2 xl:col-start-2 xl:row-start-1">
+            <PipelineHero
+              stages={stages}
+              call={lastCall}
+              phase={phase}
+              sessionFrozen={state === "FROZEN"}
+              callNumber={callNumber}
+              elapsedMs={planningMs}
+            />
+          </div>
+
+          {/* RIGHT — current tool call + layers (spans both rows on desktop) */}
+          <div className="order-3 grid min-w-0 grid-cols-1 gap-5 md:grid-cols-2 lg:col-span-2 xl:col-span-1 xl:col-start-3 xl:row-span-2 xl:row-start-1 xl:grid-cols-1 xl:content-start">
+            <ToolCallPanel call={lastCall} />
+            <LayerStatus activity={activity} hotLayer={hotLayer} />
+          </div>
+
+          {/* BELOW — behavioral analysis + timeline */}
+          <div className="order-4 grid min-w-0 grid-cols-1 gap-5 lg:col-span-2 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] xl:col-start-1 xl:row-start-2">
+            <RiskChart points={risk.points} threshold={risk.threshold} />
+            <EventTimeline items={items} onSelect={(key) => setSelected(events.find((e) => e.key === key) || null)} />
           </div>
         </div>
-        <div className="flex items-center gap-2 text-xs text-slate-400">
-          <span className="h-2 w-2 rounded-full bg-emerald-500" />
-          SYSTEM ONLINE
-          <span className="ml-3 text-slate-600">session</span>
-          <span className="font-mono text-slate-300">
-            {sessionId ? sessionId.slice(0, 8) : "—"}
-          </span>
-          <span className={cn("ml-3 font-semibold", statusTone(status))}>{status}</span>
-        </div>
-      </header>
-
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,420px)_1fr]">
-        {/* LEFT — Playground */}
-        <div className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Adversarial Agent Playground</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <p className="text-sm text-slate-400">
-                Give the agent an instruction. Tripwire will inspect the actions it
-                attempts to take at runtime.
-              </p>
-              <Textarea
-                rows={7}
-                placeholder="Type any instruction here…"
-                value={task}
-                onChange={(e) => setTask(e.target.value)}
-                disabled={runState === "running"}
-              />
-              <Input
-                type="password"
-                autoComplete="off"
-                placeholder="Access code (if the host requires one)"
-                value={accessCode}
-                onChange={(e) => updateAccessCode(e.target.value)}
-                disabled={runState === "running"}
-              />
-              <div className="flex items-center justify-between">
-                <StatusPill runState={runState} />
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    onClick={() => setTask("")}
-                    disabled={runState === "running"}
-                  >
-                    Clear
-                  </Button>
-                  <Button onClick={runAgent} disabled={runState === "running" || !task.trim()}>
-                    ▶ RUN AGENT
-                  </Button>
-                </div>
-              </div>
-              {error && <p className="text-sm text-rose-400">{error}</p>}
-            </CardContent>
-          </Card>
-
-          <AgentResponse text={agentResponse} runState={runState} />
-          <LatestDecision event={latestSecurity} sessionStatus={status} />
-          <Timeline latest={events[events.length - 1] || null} status={status} />
-        </div>
-
-        {/* RIGHT — Live Security Monitor */}
-        <div className="space-y-4">
-          <Overview counters={counters} />
-
-          <Card>
-            <CardHeader className="flex items-center justify-between gap-2">
-              <CardTitle>Live Security Monitor</CardTitle>
-              <div className="flex flex-wrap gap-1">
-                {(["ALL", "ALLOWED", "BLOCKED", "SECURITY"] as Filter[]).map((f) => (
-                  <button
-                    key={f}
-                    onClick={() => setFilter(f)}
-                    className={cn(
-                      "rounded-md px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider transition-colors",
-                      filter === f
-                        ? "bg-emerald-500/20 text-emerald-300"
-                        : "text-slate-500 hover:text-slate-300"
-                    )}
-                  >
-                    {f === "SECURITY" ? "Security" : f}
-                  </button>
-                ))}
-              </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              {filtered.length === 0 ? (
-                <p className="p-6 text-sm text-slate-500">
-                  {runState === "running"
-                    ? "Waiting for the agent's first tool call…"
-                    : "No activity yet. Enter an instruction and run the agent."}
-                </p>
-              ) : (
-                <ul className="divide-y divide-edge">
-                  {[...filtered].reverse().map((e) => {
-                    const { tone, symbol } = decisionTone(e.decision);
-                    return (
-                      <li key={e.id}>
-                        <button
-                          onClick={() => setSelected(e)}
-                          className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-white/5"
-                        >
-                          <div className="min-w-0">
-                            <div className="truncate font-mono text-sm text-slate-200">
-                              {e.toolName}
-                            </div>
-                            <div className="truncate text-xs text-slate-500">
-                              {e.layer}
-                              {e.destination ? ` · ${e.destination}` : ""}
-                              {e.riskScore !== undefined ? ` · risk ${e.riskScore}` : ""}
-                            </div>
-                          </div>
-                          <Badge tone={tone}>
-                            {symbol} {e.decision}
-                          </Badge>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+      </main>
 
       <EventDetail event={selected} onClose={() => setSelected(null)} />
-    </main>
+    </>
   );
 }
 
-function StatusPill({ runState }: { runState: RunState }) {
-  const map = {
-    idle: { c: "text-slate-400", t: "● Ready" },
-    running: { c: "text-amber-400", t: "● Agent running" },
-    completed: { c: "text-emerald-400", t: "✓ Completed" },
-    error: { c: "text-rose-400", t: "✕ Error" },
-  } as const;
-  const s = map[runState];
-  return <span className={cn("text-sm font-medium", s.c)}>{s.t}</span>;
-}
-
-function Overview({ counters }: { counters: ReturnType<typeof computeCounters> }) {
-  const tiles = [
-    { label: "Total Tool Calls", value: counters.totalToolCalls, c: "text-slate-100" },
-    { label: "Allowed", value: counters.allowed, c: "text-emerald-400" },
-    { label: "Blocked", value: counters.blocked, c: "text-orange-400" },
-    { label: "Quarantined", value: counters.quarantined, c: "text-lime-400" },
-    {
-      label: "Current Risk",
-      value: counters.risk,
-      c:
-        counters.risk === "HIGH"
-          ? "text-rose-400"
-          : counters.risk === "ELEVATED"
-          ? "text-amber-400"
-          : "text-emerald-400",
-    },
-  ];
+function AgentAnswer({ text, runState }: { text: string | null; runState: RunState }) {
+  if (runState === "idle") return null;
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-      {tiles.map((t) => (
-        <Card key={t.label}>
-          <CardContent className="py-3">
-            <div className="text-[11px] uppercase tracking-wider text-slate-500">{t.label}</div>
-            <div className={cn("mt-1 text-2xl font-bold tabular-nums", t.c)}>{t.value}</div>
-          </CardContent>
-        </Card>
-      ))}
-    </div>
-  );
-}
-
-function AgentResponse({ text, runState }: { text: string | null; runState: RunState }) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Agent Response</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {runState === "running" ? (
-          <p className="text-sm text-slate-500">Agent is working…</p>
-        ) : text ? (
-          <p className="whitespace-pre-wrap text-sm text-slate-200">{text}</p>
-        ) : runState === "completed" ? (
-          <p className="text-sm text-slate-500">
-            The agent finished without a final text response (e.g. the session was
-            frozen or blocked before it answered).
-          </p>
-        ) : (
-          <p className="text-sm text-slate-500">
-            The agent&apos;s final response will appear here after a run.
-          </p>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function LatestDecision({
-  event,
-  sessionStatus,
-}: {
-  event: DisplayEvent | null;
-  sessionStatus: SessionStatus;
-}) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Latest Security Decision</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {!event ? (
-          <p className="text-sm text-slate-500">No security action yet.</p>
-        ) : (
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <span className="text-lg">🔴</span>
-              <span className="text-sm font-bold uppercase tracking-wide text-rose-300">
-                {event.layer}
-              </span>
-            </div>
-            <Field label="Tool" value={event.toolName} mono />
-            <Field label="Decision" value={event.decision} />
-            {event.destination && <Field label="Destination" value={event.destination} mono />}
-            {event.riskScore !== undefined && (
-              <Field label="Risk score" value={String(event.riskScore)} />
-            )}
-            {event.reason && <Field label="Reason" value={event.reason} />}
-            <Field label="Action" value={event.action || event.decision} />
-            <Field label="Backend execution" value={event.backendReached ? "REACHED" : "NOT REACHED"} />
-            <Field label="Session status" value={sessionStatus} />
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function Timeline({ latest, status }: { latest: DisplayEvent | null; status: SessionStatus }) {
-  const denied =
-    latest && ["BLOCKED", "QUARANTINED", "FROZEN", "TRIGGERED", "LOCKED OUT"].includes(latest.decision);
-  const stages = [
-    { k: "USER REQUEST", on: !!latest || status !== "READY" },
-    { k: "AI AGENT", on: !!latest || status === "RUNNING" },
-    { k: "MCP TOOL CALL", on: !!latest },
-    { k: "TRIPWIRE INSPECTION", on: !!latest },
-    {
-      k: denied ? "SECURITY BLOCK" : "SECURITY DECISION",
-      on: !!latest,
-      danger: !!denied,
-    },
-    { k: denied ? "BACKEND — NOT REACHED" : "BACKEND", on: !!latest && !denied },
-  ];
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Runtime Timeline</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-1.5">
-        {stages.map((s, i) => (
-          <div key={i} className="flex items-center gap-2">
-            <span
-              className={cn(
-                "h-2 w-2 shrink-0 rounded-full",
-                s.danger ? "bg-rose-500" : s.on ? "bg-emerald-500" : "bg-slate-700"
-              )}
-            />
-            <span
-              className={cn(
-                "text-xs font-medium tracking-wide",
-                s.danger ? "text-rose-300" : s.on ? "text-slate-200" : "text-slate-600"
-              )}
-            >
-              {s.k}
-            </span>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-function Field({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="grid grid-cols-[130px_1fr] gap-2 text-sm">
-      <span className="text-slate-500">{label}</span>
-      <span className={cn("text-slate-200", mono && "font-mono break-all")}>{value}</span>
-    </div>
+    <details className="tw-panel group p-4" open={!!text}>
+      <summary className="tw-label flex cursor-pointer list-none items-center justify-between !text-slate-300">
+        Agent final answer
+        <span className="text-slate-500 group-open:rotate-90">▸</span>
+      </summary>
+      <div className="mt-3 max-h-72 overflow-y-auto whitespace-pre-wrap text-[13px] leading-relaxed text-slate-300">
+        {runState === "running"
+          ? "The agent is still working…"
+          : text || "No final answer — Tripwire froze the session before the agent could reply."}
+      </div>
+    </details>
   );
 }
 
@@ -509,31 +299,40 @@ function EventDetail({ event, onClose }: { event: DisplayEvent | null; onClose: 
       {event && (
         <>
           <div className="flex items-center justify-between border-b border-edge px-4 py-3">
-            <h3 className="text-sm font-bold uppercase tracking-wide text-slate-200">
-              {event.eventType.replace(/_/g, " ")}
-            </h3>
-            <button onClick={onClose} className="text-slate-500 hover:text-slate-200">
+            <h3 className="font-mono text-sm font-bold uppercase tracking-[0.15em] text-slate-200">{event.type.replace(/_/g, " ")}</h3>
+            <button onClick={onClose} className="text-slate-500 hover:text-slate-200" aria-label="Close">
               ✕
             </button>
           </div>
-          <div className="space-y-2 p-4">
-            <Field label="Tool" value={event.toolName} mono />
-            <Field label="Timestamp" value={new Date(event.ts).toLocaleTimeString()} />
-            <Field label="Session ID" value={event.sessionId} mono />
-            <Field label="Decision" value={event.decision} />
-            <Field label="Security layer" value={event.layer} />
-            {event.reason && <Field label="Reason" value={event.reason} />}
-            <Field label="Action" value={event.action || event.decision} />
-            {event.destination && <Field label="Destination" value={event.destination} mono />}
-            {event.riskScore !== undefined && (
-              <Field label="Risk score" value={String(event.riskScore)} />
+          <div className="space-y-2 p-4 text-sm">
+            <Row label="Tool" value={event.toolName} />
+            <Row label="Time" value={new Date(event.ts).toLocaleTimeString([], { hour12: false })} />
+            <Row label="Event ID" value={String(event.raw.event_id)} />
+            <Row label="Decision" value={event.decision} />
+            <Row label="Layer" value={event.layer} />
+            {event.raw.reason && <Row label="Reason" value={event.raw.reason} />}
+            {event.raw.destination && <Row label="Destination" value={event.raw.destination} />}
+            {event.raw.risk_score !== undefined && <Row label="Risk" value={String(event.raw.risk_score)} />}
+            {event.raw.checks && event.raw.checks.length > 0 && (
+              <div className="pt-1">
+                <div className="tw-label mb-1.5">Checks evaluated, in order</div>
+                <ul className="space-y-1 font-mono text-xs">
+                  {event.raw.checks.map((c) => (
+                    <li key={c.layer} className="flex justify-between rounded border border-edge bg-black/30 px-2 py-1">
+                      <span className="text-slate-300">{c.layer}</span>
+                      <span className={c.verdict === "pass" || c.verdict === "n/a" ? "text-slate-500" : "font-bold text-rose-300"}>
+                        {c.verdict.toUpperCase()}
+                        {c.risk_score != null ? ` · ${c.risk_score}` : ""}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
-            {event.severity && <Field label="Severity" value={event.severity} />}
-            <Field label="Backend execution" value={event.backendReached ? "REACHED" : "NOT REACHED"} />
             {event.raw.arguments && Object.keys(event.raw.arguments).length > 0 && (
               <div className="pt-1">
-                <div className="mb-1 text-slate-500">Arguments</div>
-                <pre className="max-h-40 overflow-auto rounded-md border border-edge bg-black/40 p-2 text-xs text-slate-300">
+                <div className="tw-label mb-1.5">Arguments · redacted by Tripwire</div>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border border-edge bg-black/40 p-2 font-mono text-xs text-slate-300">
                   {JSON.stringify(event.raw.arguments, null, 2)}
                 </pre>
               </div>
@@ -542,5 +341,14 @@ function EventDetail({ event, onClose }: { event: DisplayEvent | null; onClose: 
         </>
       )}
     </Dialog>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[92px_1fr] gap-2">
+      <span className="text-slate-500">{label}</span>
+      <span className="break-all font-mono text-xs leading-5 text-slate-200">{value}</span>
+    </div>
   );
 }

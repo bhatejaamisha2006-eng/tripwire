@@ -63,12 +63,16 @@ def ensure_session(session_id: str):
 
 
 def log_event(session_id: str, event_type: str, tool_name: str, arguments: dict, is_canary: bool):
+    """Append an event; returns (row id, timestamp) so the live broadcast can
+    carry the same identity as the persisted row."""
+    ts = time.time()
     with get_conn() as conn:
-        conn.execute(
+        cur = conn.execute(
             """INSERT INTO events (session_id, ts, event_type, tool_name, arguments, is_canary)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            (session_id, time.time(), event_type, tool_name, json.dumps(arguments), int(is_canary)),
+            (session_id, ts, event_type, tool_name, json.dumps(arguments), int(is_canary)),
         )
+        return cur.lastrowid, ts
 
 
 def freeze_session(session_id: str, reason: str):
