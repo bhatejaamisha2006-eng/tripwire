@@ -120,5 +120,78 @@ class TestScenario3Runtime(unittest.TestCase):
         self.assertTrue(db.is_frozen(self.session_id))
 
 
+
+
+class TestRestrictedFileRead(unittest.TestCase):
+    """The same restricted config file is protected on read_file, however the
+    path is spelled — not only via run_command."""
+
+    VARIANTS = [
+        "config/app.env",
+        "./config/app.env",
+        "/config/app.env",
+        "config//app.env",
+        "config\\app.env",
+        "logs/../config/app.env",
+        "CONFIG/APP.ENV",
+        " config/app.env ",
+        "mcp_lab/workspace/config/app.env",
+        "/Users/someone/tripwire/mcp_lab/workspace/config/app.env",
+        "file:///workspace/config/app.env",
+    ]
+
+    def test_all_spellings_blocked(self):
+        for path in self.VARIANTS:
+            with self.subTest(path=path):
+                self.assertEqual(policy.check_policy("read_file", {"path": path}), "BLOCK")
+
+    def test_ordinary_reads_allowed(self):
+        for path in ("README.md", "logs/build-error.log", "config", "config/app.env.example",
+                     "docs/app.env.md"):
+            with self.subTest(path=path):
+                self.assertEqual(policy.check_policy("read_file", {"path": path}), "ALLOW")
+
+    def test_missing_path_allowed(self):
+        self.assertEqual(policy.check_policy("read_file", {}), "ALLOW")
+
+
+class TestRestrictedFileReadRuntime(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+        cls.client.__enter__()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.__exit__(None, None, None)
+
+    def setUp(self):
+        self.session_id = self.client.post("/mcp/session").json()["session_id"]
+
+    def test_read_file_blocked_before_backend(self):
+        # One fresh session per spelling: a single direct attempt is a plain
+        # policy block. (Repeated attempts in one session are behavioral — see
+        # test_scenario6_behavior.)
+        for path in ("config/app.env", "./config/app.env", "CONFIG/APP.ENV"):
+            with self.subTest(path=path):
+                sid = self.client.post("/mcp/session").json()["session_id"]
+                resp = self.client.post("/mcp/call", json={
+                    "session_id": sid, "tool": "read_file", "arguments": {"path": path}})
+                self.assertEqual(resp.status_code, 403)
+                self.assertIn("read_file blocked by policy", resp.json()["error"])
+                self.assertNotIn("placeholder_not_real", resp.text)
+                events = self.client.get("/mcp/trail", params={"session_id": sid}).json()["events"]
+                types = [e["event_type"] for e in events]
+                self.assertEqual(types, ["tool_call", "policy_block"])
+                self.assertFalse(db.is_frozen(sid))
+
+    def test_other_files_still_readable(self):
+        resp = self.client.post("/mcp/call", json={
+            "session_id": self.session_id, "tool": "read_file",
+            "arguments": {"path": "logs/build-error.log"}})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("BUILD-7731", resp.text)
+
+
 if __name__ == "__main__":
     unittest.main()

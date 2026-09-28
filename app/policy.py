@@ -1,3 +1,5 @@
+import posixpath
+
 SENSITIVE_TOOLS = {
     "get_admin_credentials",  # Canary: handled by deception/canary branch upstream
     "restart_server",         # Protected non-canary tool: blocked by policy
@@ -18,6 +20,33 @@ RESTRICTED_COMMAND_PATTERNS = (".env", "secrets", "credential", "id_rsa", "confi
 # multiple classes of dangerous action.
 DESTRUCTIVE_TOOLS = {"delete_file"}
 
+# Restricted secrets/config files, as workspace-relative paths (lowercase). The
+# same material RESTRICTED_COMMAND_PATTERNS protects on run_command must not be
+# reachable through the dedicated file-reading tool either — otherwise an agent
+# following an injected "read the env file" instruction just uses read_file.
+RESTRICTED_FILES = {"config/app.env"}
+FILE_READ_TOOLS = {"read_file"}
+
+
+def _canonical_path(path: str) -> str:
+    """Normalise a requested path so equivalent spellings compare equal:
+    backslashes, ./ and // segments, .. traversal, a leading / and case (the
+    demo runs on a case-insensitive filesystem, where CONFIG/APP.ENV opens the
+    same file)."""
+    p = (path or "").strip().replace("\\", "/")
+    if p.lower().startswith("file://"):
+        p = p[len("file://"):]
+    return posixpath.normpath(p).lstrip("/").lower()
+
+
+def _is_restricted_file(path: str) -> bool:
+    """True if `path` names a restricted file, however it is spelled — relative
+    (config/app.env, ./config//app.env), absolute (/config/app.env, or the full
+    host path ending in mcp_lab/workspace/config/app.env) or via traversal
+    (logs/../config/app.env)."""
+    p = _canonical_path(path)
+    return any(p == f or p.endswith("/" + f) for f in RESTRICTED_FILES)
+
 
 def check_policy(tool_name: str, arguments: dict | None = None) -> str:
     if tool_name in SENSITIVE_TOOLS:
@@ -30,6 +59,9 @@ def check_policy(tool_name: str, arguments: dict | None = None) -> str:
         command = ((arguments or {}).get("command") or "").lower()
         if any(pattern in command for pattern in RESTRICTED_COMMAND_PATTERNS):
             return "BLOCK"
+
+    if tool_name in FILE_READ_TOOLS and _is_restricted_file((arguments or {}).get("path")):
+        return "BLOCK"
 
     return "ALLOW"
 
@@ -46,4 +78,8 @@ def violation_reason(tool_name: str, arguments: dict | None = None) -> str:
         command = (arguments or {}).get("command") or ""
         return (f"run_command blocked by policy: command '{command}' attempts to "
                 f"access a restricted secrets/config file")
+    if tool_name in FILE_READ_TOOLS:
+        path = (arguments or {}).get("path") or ""
+        return (f"{tool_name} blocked by policy: '{path}' is a restricted "
+                f"secrets/config file")
     return f"tool '{tool_name}' blocked by policy"
