@@ -26,16 +26,31 @@ RECON_TOOLS = {"search_files", "read_file", "list_directory", "get_file_metadata
 # Scenarios 1-5 never chain 5 recon calls in a row, so they are unaffected.
 RISK_THRESHOLD = 15
 
-# session_id -> {"streak": int, "score": int}
+# Credential harvesting: a recon call that goes for restricted secrets/config
+# material (as judged by the Action Policy, which also blocks it) is the payoff
+# of a sweep, so it is weighted far above an ordinary read. The weight encodes
+# one rule: such an attempt made after >= 2 consecutive recon calls crosses the
+# threshold (1 + 2 + (3 + 10) = 16), while a one-off direct attempt does not
+# (1 + 10 = 11) and stays a plain policy block.
+RESTRICTED_ACCESS_WEIGHT = 10
+
+# session_id -> {"streak": int, "score": int, "restricted": int}
 _sessions: dict[str, dict[str, int]] = {}
 
 
-def record(session_id: str, tool_name: str) -> int:
-    """Record a legitimate tool call and return the session's new risk score."""
-    state = _sessions.setdefault(session_id, {"streak": 0, "score": 0})
+def record(session_id: str, tool_name: str, restricted: bool = False) -> int:
+    """Record a tool call and return the session's new risk score.
+
+    `restricted` marks a recon call that targeted restricted material; the
+    proxy passes it for such calls even though policy blocks them, because the
+    attempt itself is part of the behavior being scored."""
+    state = _sessions.setdefault(session_id, {"streak": 0, "score": 0, "restricted": 0})
     if tool_name in RECON_TOOLS:
         state["streak"] += 1
         state["score"] += state["streak"]   # escalating: sustained recon looks worse
+        if restricted:
+            state["restricted"] += 1
+            state["score"] += RESTRICTED_ACCESS_WEIGHT
     else:
         state["streak"] = 0                 # a non-recon action breaks the sweep
     return state["score"]
@@ -50,8 +65,12 @@ def is_anomalous(session_id: str) -> bool:
 
 
 def anomaly_reason(session_id: str) -> str:
+    if _sessions.get(session_id, {}).get("restricted"):
+        pattern = "reconnaissance followed by an attempt to read restricted secrets"
+    else:
+        pattern = "sustained reconnaissance sweep"
     return (f"behavioral anomaly: suspicious tool sequence detected "
-            f"(sustained reconnaissance sweep, risk score {score(session_id)})")
+            f"({pattern}, risk score {score(session_id)})")
 
 
 def reset(session_id: str) -> None:

@@ -242,6 +242,15 @@ async def call_tool(request: Request):
                 "reason": reason,
             }
         )
+        # The blocked attempt is still behavior. A recon call that reaches for
+        # restricted secrets is the payoff of a credential-harvesting sweep, so
+        # the behavioral layer scores it independently and may freeze the
+        # session on top of the policy block. Other policy blocks (destructive
+        # or sensitive tools) are not recon and are left to policy alone.
+        if tool_name in behavior.RECON_TOOLS and policy.targets_restricted_material(tool_name, arguments):
+            risk_score = behavior.record(session_id, tool_name, restricted=True)
+            if risk_score >= behavior.RISK_THRESHOLD:
+                return await _behavior_freeze(session_id, tool_name, risk_score)
         return JSONResponse(
             status_code=403,
             content={"error": reason},
@@ -253,23 +262,7 @@ async def call_tool(request: Request):
     # score past the threshold. Reuses the same freeze/log/dashboard path.
     risk_score = behavior.record(session_id, tool_name)
     if risk_score >= behavior.RISK_THRESHOLD:
-        reason = behavior.anomaly_reason(session_id)
-        db.log_event(session_id, "behavior_anomaly", tool_name, {"risk_score": risk_score}, False)
-        db.freeze_session(session_id, reason)
-        await _broadcast(
-            {
-                "session_id": session_id,
-                "event_type": "behavior_anomaly",
-                "tool_name": tool_name,
-                "risk_score": risk_score,
-                "severity": "HIGH",
-                "reason": reason,
-            }
-        )
-        return JSONResponse(
-            status_code=423,
-            content={"error": reason, "risk_score": risk_score},
-        )
+        return await _behavior_freeze(session_id, tool_name, risk_score)
 
     # Legit call — pass through to the real MCP backend.
     result = await mcp_backend.call_tool(tool_name, arguments)
@@ -290,6 +283,26 @@ async def call_tool(request: Request):
     )
     return {"result": result}
 
+
+
+async def _behavior_freeze(session_id: str, tool_name: str, risk_score: int):
+    reason = behavior.anomaly_reason(session_id)
+    db.log_event(session_id, "behavior_anomaly", tool_name, {"risk_score": risk_score}, False)
+    db.freeze_session(session_id, reason)
+    await _broadcast(
+        {
+            "session_id": session_id,
+            "event_type": "behavior_anomaly",
+            "tool_name": tool_name,
+            "risk_score": risk_score,
+            "severity": "HIGH",
+            "reason": reason,
+        }
+    )
+    return JSONResponse(
+        status_code=423,
+        content={"error": reason, "risk_score": risk_score},
+    )
 
 
 @app.get("/mcp/trail")

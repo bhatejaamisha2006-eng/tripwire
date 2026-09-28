@@ -48,6 +48,18 @@ def _is_restricted_file(path: str) -> bool:
     return any(p == f or p.endswith("/" + f) for f in RESTRICTED_FILES)
 
 
+def targets_restricted_material(tool_name: str, arguments: dict | None = None) -> bool:
+    """True if the call reaches for restricted secrets/config (a file read or
+    a command). Lets the behavioral layer score the attempt; the BLOCK itself
+    is still check_policy's decision."""
+    if tool_name in FILE_READ_TOOLS:
+        return _is_restricted_file((arguments or {}).get("path"))
+    if tool_name == "run_command":
+        command = ((arguments or {}).get("command") or "").lower()
+        return any(pattern in command for pattern in RESTRICTED_COMMAND_PATTERNS)
+    return False
+
+
 def check_policy(tool_name: str, arguments: dict | None = None) -> str:
     if tool_name in SENSITIVE_TOOLS:
         return "BLOCK"
