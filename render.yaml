@@ -1,0 +1,22 @@
+# Render Blueprint for the Tripwire backend (FastAPI proxy + MCP server +
+# Ollama/qwen3:4b), built from the repo's Dockerfile.
+services:
+  - type: web
+    name: tripwire-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # qwen3:4b needs ~2.5 GB for weights plus ~1.2 GB for a 16K q8 context;
+    # 8 GB leaves headroom. More cores = faster agent steps (8c-16g is ~2x).
+    plan: 4c-8g
+    # Run/risk/quarantine state is in memory: keep exactly one instance.
+    numInstances: 1
+    healthCheckPath: /healthz
+    envVars:
+      - key: TRIPWIRE_MODEL
+        value: qwen3:4b
+      - key: TRIPWIRE_NUM_CTX
+        value: "16384"
+      # Shared access code judges type into the UI to start a run. Leave it
+      # empty to allow anyone with the link to run the agent.
+      - key: TRIPWIRE_ACCESS_KEY
+        sync: false

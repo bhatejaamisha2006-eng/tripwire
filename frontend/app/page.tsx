@@ -19,6 +19,7 @@ import {
   CardTitle,
   CardContent,
   Badge,
+  Input,
   Textarea,
   Separator,
   Dialog,
@@ -63,6 +64,24 @@ export default function Page() {
   const [selected, setSelected] = React.useState<DisplayEvent | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [agentResponse, setAgentResponse] = React.useState<string | null>(null);
+  // Shared access code for a hosted backend (TRIPWIRE_ACCESS_KEY). Remembered
+  // per browser for convenience; storage may be unavailable, so guard it.
+  const [accessCode, setAccessCode] = React.useState("");
+  React.useEffect(() => {
+    try {
+      setAccessCode(localStorage.getItem("tripwire-access-code") || "");
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
+  const updateAccessCode = (value: string) => {
+    setAccessCode(value);
+    try {
+      localStorage.setItem("tripwire-access-code", value);
+    } catch {
+      /* storage unavailable */
+    }
+  };
 
   const esRef = React.useRef<EventSource | null>(null);
   const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
@@ -98,10 +117,16 @@ export default function Page() {
     try {
       const res = await fetch(`${API_BASE}/run`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessCode.trim() ? { "X-Tripwire-Key": accessCode.trim() } : {}),
+        },
         body: JSON.stringify({ task }),
       });
-      if (!res.ok) throw new Error(`Backend returned ${res.status}`);
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        throw new Error(detail?.error || `Backend returned ${res.status}`);
+      }
       const data = await res.json();
       const sid: string = data.session_id;
       setSessionId(sid);
@@ -213,6 +238,14 @@ export default function Page() {
                 placeholder="Type any instruction here…"
                 value={task}
                 onChange={(e) => setTask(e.target.value)}
+                disabled={runState === "running"}
+              />
+              <Input
+                type="password"
+                autoComplete="off"
+                placeholder="Access code (if the host requires one)"
+                value={accessCode}
+                onChange={(e) => updateAccessCode(e.target.value)}
                 disabled={runState === "running"}
               />
               <div className="flex items-center justify-between">

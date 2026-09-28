@@ -14,7 +14,9 @@ about live. Once this logic is proven, the `mock_backend` calls can be
 swapped for a real `mcp` SDK client without touching the trigger logic.
 """
 import asyncio
+import hmac
 import json
+import os
 import threading
 import uuid
 from contextlib import asynccontextmanager
@@ -377,17 +379,37 @@ async def run_agent_endpoint(request: Request):
     judge's task, through the EXISTING MCP client + Tripwire proxy. Returns a
     Tripwire session id immediately; the agent runs in the background and its
     real tool calls / security events flow through the existing event system."""
+    # Optional shared access code for a hosted deployment, so a public link
+    # can't be used to drive the model by anyone who finds it.
+    access_key = os.environ.get("TRIPWIRE_ACCESS_KEY", "")
+    if access_key and not hmac.compare_digest(
+        request.headers.get("x-tripwire-key", ""), access_key
+    ):
+        return JSONResponse(status_code=401, content={"error": "a valid access code is required"})
+
     body = await request.json()
     task = (body.get("task") or "").strip()
     if not task:
         return JSONResponse(status_code=400, content={"error": "task is required"})
+
+    # One model serves every run, one request at a time; queueing a second run
+    # behind it would just make both look hung. (No await between this check
+    # and registering the run below, so concurrent requests can't both pass.)
+    if any(r["status"] == "running" for r in _runs.values()):
+        return JSONResponse(
+            status_code=429,
+            content={"error": "another agent run is in progress — try again when it finishes"},
+        )
 
     # Import here so the proxy has no hard import-time dependency on Ollama.
     from .agent_demo import run_agent, DEFAULT_MODEL
 
     session_id = str(uuid.uuid4())
     db.ensure_session(session_id)
-    proxy_url = str(request.base_url).rstrip("/")
+    # Behind a hosting load balancer the public base URL can come back as
+    # http:// and be redirected to https://, which turns the agent's POSTs into
+    # GETs. A hosted deployment sets TRIPWIRE_INTERNAL_URL to loopback instead.
+    proxy_url = os.environ.get("TRIPWIRE_INTERNAL_URL") or str(request.base_url).rstrip("/")
     model = body.get("model") or DEFAULT_MODEL
     max_steps = int(body.get("max_steps") or 12)
     think = bool(body.get("think", False))
@@ -426,6 +448,12 @@ def run_status(session_id: str):
         "error": info.get("error"),
         "response": info.get("response"),
     }
+
+
+@app.get("/healthz")
+def healthz():
+    """Liveness for the hosting platform's health check."""
+    return {"status": "ok"}
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

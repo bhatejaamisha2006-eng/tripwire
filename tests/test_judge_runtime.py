@@ -10,6 +10,8 @@ Covers the root causes behind "only delete_file ever gets exercised":
     that passed every layer and actually reached the backend.
 """
 import json
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -84,6 +86,83 @@ class TestExplicitAllowDecision(unittest.TestCase):
     def test_canary_call_never_emits_tool_allowed(self):
         self._call("export_crm_contacts", {"segment": "login-failures"})
         self.assertNotIn("tool_allowed", self._types())
+
+
+
+
+class TestRunEndpointHosting(unittest.TestCase):
+    """POST /run guards for a hosted deployment. run_agent is stubbed so no
+    model is needed."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+        cls.client.__enter__()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.__exit__(None, None, None)
+
+    def setUp(self):
+        from app import proxy
+        self.proxy = proxy
+        self.saved_runs = dict(proxy._runs)
+        proxy._runs.clear()
+        self.calls = []
+        self.release = threading.Event()
+
+        def fake_run_agent(task, **kwargs):
+            self.calls.append(kwargs)
+            self.release.wait(5)
+            return "ok"
+
+        patcher = mock.patch.object(agent_demo, "run_agent", side_effect=fake_run_agent)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        # Let the stubbed runs finish before restoring _runs, so the proxy's
+        # background thread doesn't write into a cleared dict.
+        self.release.set()
+        for _ in range(100):
+            if all(r["status"] != "running" for r in self.proxy._runs.values()):
+                break
+            time.sleep(0.02)
+        self.proxy._runs.clear()
+        self.proxy._runs.update(self.saved_runs)
+
+    def test_access_key_required_when_configured(self):
+        with mock.patch.dict("os.environ", {"TRIPWIRE_ACCESS_KEY": "s3cret"}):
+            self.assertEqual(self.client.post("/run", json={"task": "t"}).status_code, 401)
+            bad = self.client.post("/run", json={"task": "t"}, headers={"X-Tripwire-Key": "nope"})
+            self.assertEqual(bad.status_code, 401)
+            ok = self.client.post("/run", json={"task": "t"}, headers={"X-Tripwire-Key": "s3cret"})
+            self.assertEqual(ok.status_code, 200)
+
+    def test_no_key_configured_allows_runs(self):
+        with mock.patch.dict("os.environ", {"TRIPWIRE_ACCESS_KEY": ""}):
+            self.assertEqual(self.client.post("/run", json={"task": "t"}).status_code, 200)
+
+    def test_second_concurrent_run_is_rejected(self):
+        with mock.patch.dict("os.environ", {"TRIPWIRE_ACCESS_KEY": ""}):
+            self.assertEqual(self.client.post("/run", json={"task": "a"}).status_code, 200)
+            busy = self.client.post("/run", json={"task": "b"})
+            self.assertEqual(busy.status_code, 429)
+            self.assertIn("in progress", busy.json()["error"])
+
+    def test_agent_uses_internal_url_when_set(self):
+        env = {"TRIPWIRE_ACCESS_KEY": "", "TRIPWIRE_INTERNAL_URL": "http://127.0.0.1:9123"}
+        with mock.patch.dict("os.environ", env):
+            self.client.post("/run", json={"task": "t"})
+            self.release.set()
+            for _ in range(50):
+                if self.calls:
+                    break
+                time.sleep(0.05)
+        self.assertEqual(self.calls[0]["proxy_url"], "http://127.0.0.1:9123")
+
+    def test_healthz(self):
+        self.assertEqual(self.client.get("/healthz").json(), {"status": "ok"})
 
 
 if __name__ == "__main__":

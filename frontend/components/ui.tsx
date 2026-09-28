@@ -91,6 +91,18 @@ export function Textarea({ className, ...props }: React.TextareaHTMLAttributes<H
   );
 }
 
+export function Input({ className, ...props }: React.InputHTMLAttributes<HTMLInputElement>) {
+  return (
+    <input
+      className={cn(
+        "w-full rounded-md border border-edge bg-black/30 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500/40",
+        className
+      )}
+      {...props}
+    />
+  );
+}
+
 export function Separator({ className }: { className?: string }) {
   return <div className={cn("h-px w-full bg-edge", className)} />;
 }
