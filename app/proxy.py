@@ -273,6 +273,21 @@ async def call_tool(request: Request):
 
     # Legit call — pass through to the real MCP backend.
     result = await mcp_backend.call_tool(tool_name, arguments)
+
+    # The explicit ALLOW decision. `tool_call` above is only the intake record
+    # (emitted before the canary/policy/behavior checks run), so the dashboard
+    # must not treat it as "allowed"; this event is emitted only once a call
+    # has passed every layer and the backend actually executed it.
+    db.log_event(session_id, "tool_allowed", tool_name, arguments, False)
+    await _broadcast(
+        {
+            "session_id": session_id,
+            "event_type": "tool_allowed",
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "decision": "ALLOWED",
+        }
+    )
     return {"result": result}
 
 
@@ -291,8 +306,8 @@ def recent_events(limit: int = 200):
 # Event types the live stream broadcasts to the dashboard (i.e. everything
 # except the internal 'freeze' bookkeeping row, which is never sent live).
 _DASHBOARD_EVENT_TYPES = {
-    "tool_call", "canary_trigger", "policy_block", "network_block", "frozen_block",
-    "behavior_anomaly", "tool_poisoning",
+    "tool_call", "tool_allowed", "canary_trigger", "policy_block", "network_block",
+    "frozen_block", "behavior_anomaly", "tool_poisoning",
 }
 
 

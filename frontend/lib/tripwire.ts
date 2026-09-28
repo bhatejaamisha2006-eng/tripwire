@@ -26,6 +26,7 @@ export type Decision =
   | "FROZEN"
   | "TRIGGERED"
   | "LOCKED OUT"
+  | "RECEIVED"
   | "INFO";
 
 export interface DisplayEvent {
@@ -64,7 +65,12 @@ export function normalize(raw: RawEvent, id: number): DisplayEvent {
     raw,
   };
   switch (raw.event_type) {
+    // tool_call is Tripwire's intake record, emitted BEFORE the security layers
+    // run — it is not a decision. The outcome arrives as a separate event:
+    // tool_allowed, or one of the block/trigger/freeze events below.
     case "tool_call":
+      return { ...base, decision: "RECEIVED", layer: "Intercepted by Tripwire", backendReached: false };
+    case "tool_allowed":
       return { ...base, decision: "ALLOWED", layer: "Passed all checks", backendReached: true };
     case "canary_trigger":
       return {
@@ -124,17 +130,17 @@ export interface Counters {
 
 export function computeCounters(events: DisplayEvent[]): Counters {
   const count = (t: string) => events.filter((e) => e.eventType === t).length;
-  const toolCalls = count("tool_call");
   const policy = count("policy_block");
   const canary = count("canary_trigger");
   const behavior = count("behavior_anomaly");
   const network = count("network_block");
   const frozen = count("frozen_block");
   const quarantined = count("tool_poisoning");
-  // tool_call is logged before the policy/canary/behavior checks, so subtract
-  // those to count only genuinely allowed executions. network_block and
-  // tool_poisoning never emit a tool_call.
-  const allowed = Math.max(0, toolCalls - policy - canary - behavior);
+  // Every call attempt is either intercepted (tool_call) or rejected before
+  // intake (network_block / frozen_block). "Allowed" counts only the backend's
+  // explicit ALLOW decisions — never inferred from a call merely appearing.
+  const toolCalls = count("tool_call") + network + frozen;
+  const allowed = count("tool_allowed");
   const blocked = policy + network + frozen;
   const security = policy + canary + behavior + network + frozen + quarantined;
   const risk: Counters["risk"] =
