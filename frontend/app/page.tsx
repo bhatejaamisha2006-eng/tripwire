@@ -235,7 +235,7 @@ export default function Page() {
           </Card>
 
           <AgentResponse text={agentResponse} runState={runState} />
-          <LatestDecision event={latestSecurity} />
+          <LatestDecision event={latestSecurity} sessionStatus={status} />
           <Timeline latest={events[events.length - 1] || null} status={status} />
         </div>
 
@@ -377,7 +377,13 @@ function AgentResponse({ text, runState }: { text: string | null; runState: RunS
   );
 }
 
-function LatestDecision({ event }: { event: DisplayEvent | null }) {
+function LatestDecision({
+  event,
+  sessionStatus,
+}: {
+  event: DisplayEvent | null;
+  sessionStatus: SessionStatus;
+}) {
   return (
     <Card>
       <CardHeader>
@@ -403,6 +409,7 @@ function LatestDecision({ event }: { event: DisplayEvent | null }) {
             {event.reason && <Field label="Reason" value={event.reason} />}
             <Field label="Action" value={event.action || event.decision} />
             <Field label="Backend execution" value={event.backendReached ? "REACHED" : "NOT REACHED"} />
+            <Field label="Session status" value={sessionStatus} />
           </div>
         )}
       </CardContent>
