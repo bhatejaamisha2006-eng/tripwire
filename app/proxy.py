@@ -1,17 +1,21 @@
 """
-Tripwire proxy — the actual product.
+Tripwire proxy — the runtime enforcement point.
 
-Every tool call an agent makes flows through here instead of hitting
-the real MCP backend directly:
+Every tool call an agent makes flows through here instead of reaching the
+MCP tool server directly:
 
-    agent  --tools/list-->   [PROXY: real tools + canaries]
-    agent  --tools/call-->   [PROXY: canary? freeze + log + fake response
-                                      real?  pass through + log]
+    agent --GET  /mcp/tools--> [PROXY: real MCP tools + canaries; poisoned
+                                        tool metadata is quarantined]
+    agent --POST /mcp/call --> [PROXY: session freeze -> tool integrity ->
+                                        network policy -> canary -> action
+                                        policy -> behavioral analysis]
+                                  ALLOW -> MCP server (mcp_lab/server.py,
+                                           spoken to over MCP stdio)
+                                  else  -> block / freeze / quarantine
 
-This is intentionally a thin, readable HTTP/JSON layer rather than a
-strict MCP-protocol implementation, so it's easy to demo and reason
-about live. Once this logic is proven, the `mock_backend` calls can be
-swapped for a real `mcp` SDK client without touching the trigger logic.
+The agent talks to the proxy over plain HTTP/JSON; the proxy talks to the
+real tool server with the MCP Python SDK. Every decision is logged to SQLite
+and broadcast to the dashboard over Server-Sent Events.
 """
 import asyncio
 import hmac
