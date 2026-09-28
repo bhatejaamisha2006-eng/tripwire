@@ -19,7 +19,6 @@ export function AttackConsole({
   selectedId,
   runningId,
   running,
-  poisonedToolEnabled,
   accessKeyRequired,
   task,
   accessCode,
@@ -32,7 +31,6 @@ export function AttackConsole({
   selectedId: string | null;
   runningId: string | null;
   running: boolean;
-  poisonedToolEnabled: boolean | null;
   accessKeyRequired: boolean;
   task: string;
   accessCode: string;
@@ -52,7 +50,6 @@ export function AttackConsole({
           const c = ACCENT[s.accent];
           const selected = selectedId === s.id && !custom;
           const live = runningId === s.id && running;
-          const flagOff = s.needsFlag && poisonedToolEnabled === false;
           return (
             <li key={s.id}>
               <button
@@ -61,7 +58,7 @@ export function AttackConsole({
                   onSelect(s);
                 }}
                 disabled={running}
-                title={flagOff ? "Needs TRIPWIRE_ENABLE_POISONED_TOOL=1 on the backend" : s.task}
+                title={s.task}
                 className={cn(
                   "group relative flex w-full items-center gap-3 overflow-hidden rounded-xl border px-3 py-2.5 text-left transition-all duration-300 disabled:cursor-not-allowed",
                   !selected && "hover:border-slate-600 hover:bg-white/[0.03]",
@@ -85,8 +82,6 @@ export function AttackConsole({
                   <span className="flex items-center gap-1 font-mono text-[9.5px] font-bold tracking-[0.15em] text-amber-300">
                     <span className="h-1.5 w-1.5 rounded-full bg-amber-400 tw-blink" /> LIVE
                   </span>
-                ) : flagOff ? (
-                  <span className="font-mono text-[9px] tracking-wider text-amber-400/80">FLAG OFF</span>
                 ) : null}
               </button>
             </li>

@@ -107,5 +107,56 @@ class TestScenario7Runtime(unittest.TestCase):
         self.assertIn("network policy", resp.json()["error"].lower())
 
 
+class TestScenario7PerSession(unittest.TestCase):
+    """The S7 preset attaches the poisoned-tool fixture to its own session via
+    POST /run — no global flag — and Tool Integrity must catch it."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.pop("TRIPWIRE_ENABLE_POISONED_TOOL", None)
+        tool_integrity.disable_poisoned_tool()
+        cls.client = TestClient(app)
+        cls.client.__enter__()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.__exit__(None, None, None)
+
+    def _start_run(self, **extra):
+        from unittest import mock
+        from app import agent_demo, proxy
+        with mock.patch.object(agent_demo, "run_agent", return_value="ok"), \
+             mock.patch.dict(os.environ, {"TRIPWIRE_ACCESS_KEY": ""}):
+            proxy._runs.clear()
+            sid = self.client.post("/run", json={"task": "t", **extra}).json()["session_id"]
+        return sid
+
+    def _tool_names(self, sid):
+        return [t["name"] for t in self.client.get("/mcp/tools", params={"session_id": sid}).json()["tools"]]
+
+    def _types(self, sid):
+        return [e["event_type"] for e in self.client.get("/mcp/trail", params={"session_id": sid}).json()["events"]]
+
+    def test_s7_session_gets_fixture_and_tool_integrity_quarantines_it(self):
+        sid = self._start_run(poisoned_tool=True)
+        names = self._tool_names(sid)
+        self.assertNotIn(tool_integrity.POISONED_TOOL["name"], names)  # withheld
+        self.assertIn("read_file", names)
+        types = self._types(sid)
+        self.assertIn("tool_poisoning", types)
+        self.assertNotIn("canary_trigger", types)
+        # A direct call is refused by Tool Integrity, never classified as Canary.
+        resp = self.client.post("/mcp/call", json={
+            "session_id": sid, "tool": tool_integrity.POISONED_TOOL["name"], "arguments": {}})
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("tool-integrity", resp.json()["error"])
+        self.assertEqual(self._types(sid).count("canary_trigger"), 0)
+
+    def test_other_sessions_unaffected(self):
+        sid = self._start_run()
+        self._tool_names(sid)
+        self.assertNotIn("tool_poisoning", self._types(sid))
+
+
 if __name__ == "__main__":
     unittest.main()

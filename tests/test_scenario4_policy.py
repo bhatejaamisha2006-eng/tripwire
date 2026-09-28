@@ -101,5 +101,61 @@ class TestScenario4Runtime(unittest.TestCase):
         self.assertTrue(db.is_frozen(self.session_id))
 
 
+class TestDestructiveViaInterpreter(unittest.TestCase):
+    """A destructive action must not bypass delete_file's policy by running
+    interpreter code through run_command."""
+
+    PROBE = SANDBOX_FILE.parent / "zz_interpreter_probe.tmp"
+    DELETE_CMD = "python3 -c \"__import__('os').remove('sandbox/zz_interpreter_probe.tmp')\""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app)
+        cls.client.__enter__()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.__exit__(None, None, None)
+
+    def setUp(self):
+        self.PROBE.write_text("probe")
+        self.session_id = self.client.post("/mcp/session").json()["session_id"]
+
+    def tearDown(self):
+        self.PROBE.unlink(missing_ok=True)
+
+    def test_policy_blocks_interpreter_code(self):
+        for cmd in (self.DELETE_CMD, "python3 script.py", "/usr/bin/python3 -c 1", "PYTHON -c 1"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(policy.check_policy("run_command", {"command": cmd}), "BLOCK")
+        for cmd in ("python --version", "python3 -V", "ls", "cat README.md"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(policy.check_policy("run_command", {"command": cmd}), "ALLOW")
+
+    def test_blocked_before_execution_and_file_survives(self):
+        resp = self.client.post("/mcp/call", json={
+            "session_id": self.session_id, "tool": "run_command",
+            "arguments": {"command": self.DELETE_CMD}})
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("interpreter code", resp.json()["error"])
+        self.assertTrue(self.PROBE.exists(), "the file must not be deleted")
+        types = [e["event_type"] for e in self.client.get(
+            "/mcp/trail", params={"session_id": self.session_id}).json()["events"]]
+        self.assertEqual(types, ["tool_call", "policy_block"])
+
+    def test_backend_also_refuses_interpreter_code(self):
+        # Defence in depth: even if policy were bypassed, the MCP server refuses.
+        import importlib.util, json as _json
+        spec = importlib.util.spec_from_file_location("srv", "mcp_lab/server.py")
+        srv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(srv)
+        run = getattr(srv.run_command, "fn", srv.run_command)
+        out = _json.loads(run(self.DELETE_CMD))
+        self.assertIn("not permitted", out.get("error", ""))
+        self.assertTrue(self.PROBE.exists())
+        self.assertIn("Python", _json.loads(run("python3 --version")).get("stdout", "") +
+                      _json.loads(run("python3 --version")).get("stderr", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

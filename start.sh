@@ -3,7 +3,7 @@
 set -e
 
 PORT="${PORT:-8000}"
-MODEL="${TRIPWIRE_MODEL:-qwen3:4b}"
+MODEL="${TRIPWIRE_MODEL:-qwen3:4b-instruct-2507-q4_K_M}"
 NUM_CTX="${TRIPWIRE_NUM_CTX:-16384}"
 
 # One model, kept resident, one request at a time (the agent is sequential).

@@ -1,4 +1,4 @@
-# Tripwire backend + a local Ollama running qwen3:4b, in one container.
+# Tripwire backend + a local Ollama running qwen3:4b-instruct-2507-q4_K_M, in one container.
 #
 # The FastAPI proxy, the stdio MCP server and the Ollama model server all run
 # here, so the hosted demo needs nothing on anyone's laptop. The model is
@@ -7,7 +7,7 @@
 FROM python:3.13-slim
 
 ARG OLLAMA_VERSION=0.34.4
-ARG TRIPWIRE_MODEL=qwen3:4b
+ARG TRIPWIRE_MODEL=qwen3:4b-instruct-2507-q4_K_M
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates zstd \

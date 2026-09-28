@@ -15,6 +15,7 @@ import {
   layerActivity,
   riskSeries,
   timelineItems,
+  SCENARIOS,
   caughtBy,
   THREAT_TYPES,
   FREEZING_TYPES,
@@ -182,7 +183,11 @@ export default function Page() {
           "Content-Type": "application/json",
           ...(accessCode.trim() ? { "X-Tripwire-Key": accessCode.trim() } : {}),
         },
-        body: JSON.stringify({ task }),
+        body: JSON.stringify({
+          task,
+          // The S7 preset runs against a compromised MCP server fixture.
+          poisoned_tool: SCENARIOS.find((s) => s.id === scenarioId)?.fixture === "poisoned_tool",
+        }),
       });
       if (!res.ok) {
         const detail = await res.json().catch(() => null);
@@ -229,7 +234,6 @@ export default function Page() {
               selectedId={scenarioId}
               runningId={runScenarioId}
               running={running}
-              poisonedToolEnabled={health ? health.poisonedTool : null}
               accessKeyRequired={!!health?.accessKeyRequired}
               task={task}
               accessCode={accessCode}

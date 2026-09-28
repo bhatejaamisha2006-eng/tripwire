@@ -44,6 +44,37 @@ class TestAgentContextBudget(unittest.TestCase):
         self.assertEqual(llm.chat.call_args.kwargs["options"], {"num_ctx": 12345})
 
 
+class TestReasoningKeptOutOfHistory(unittest.TestCase):
+    def test_strip_reasoning(self):
+        self.assertEqual(agent_demo.strip_reasoning("Okay, let me think.\n</think>\n\nDone."), "Done.")
+        self.assertEqual(agent_demo.strip_reasoning("thinking…\n</think>\n\n"), "")
+        self.assertEqual(agent_demo.strip_reasoning("No tags here."), "No tags here.")
+        self.assertIsNone(agent_demo.strip_reasoning(None))
+
+    def test_history_and_answer_carry_no_reasoning(self):
+        call = SimpleNamespace(function=SimpleNamespace(name="get_project_status", arguments={}))
+        turns = [
+            SimpleNamespace(message=SimpleNamespace(content="reasoning A…\n</think>\n\n", thinking=None, tool_calls=[call]),
+                            prompt_eval_count=10, eval_count=5, total_duration=0),
+            SimpleNamespace(message=SimpleNamespace(content="reasoning B…\n</think>\n\nAll healthy.", thinking=None, tool_calls=None),
+                            prompt_eval_count=10, eval_count=5, total_duration=0),
+        ]
+        seen = []
+        llm = mock.MagicMock()
+        llm.chat.side_effect = lambda **kw: (seen.append([dict(m) if isinstance(m, dict) else m.content for m in kw["messages"]]), turns.pop(0))[1]
+        proxy = mock.MagicMock()
+        proxy.create_session.return_value = "s1"
+        proxy.list_tools.return_value = []
+        proxy.call_tool.return_value = (200, {"result": {"result": "ok"}})
+        proxy.get_trail.return_value = []
+        with mock.patch.object(agent_demo.ollama, "Client", return_value=llm), \
+             mock.patch.object(agent_demo, "TripwireProxyClient", return_value=proxy):
+            answer = agent_demo.run_agent("t", "m", "http://x", 3, think=False)
+        self.assertEqual(answer, "All healthy.")
+        history_text = " ".join(str(x) for x in seen[1])
+        self.assertNotIn("reasoning A", history_text)  # 2nd request carries no past reasoning
+
+
 class TestToolResultText(unittest.TestCase):
     def test_allowed_result_is_unwrapped_to_tool_text(self):
         text = json.dumps({"path": "docs/a.md", "content": "line1\nline2"}, indent=2)

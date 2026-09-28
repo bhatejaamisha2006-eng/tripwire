@@ -197,6 +197,11 @@ def run_command(command: str) -> str:
     elif base_cmd == "git" and len(tokens) >= 2 and tokens[1] in {"status", "log", "--version"}:
         is_allowed = True
 
+    # Interpreters only for a version check (matches the tool description);
+    # running arbitrary code would bypass every other restriction here.
+    if base_cmd in {"python", "python3"} and tokens[1:] not in ([], ["--version"], ["-V"]):
+        is_allowed = False
+
     if not is_allowed:
         return json.dumps({
             "error": f"Command '{cmd_clean}' is not permitted. Only safe, read-only demo commands are allowed: ls, pwd, whoami, date, echo, git status, cat, python --version."

@@ -64,6 +64,15 @@ _subscribers: list[asyncio.Queue] = []
 # withheld from the agent and blocked if called.
 _quarantined_tools: set[str] = set()
 
+# Sessions whose MCP tool list includes the poisoned tool fixture (Scenario 7),
+# i.e. a run that simulates a compromised MCP server. Per-session so the S7
+# attack can be run without enabling the fixture for every other session.
+_poisoned_tool_sessions: set[str] = set()
+
+
+def _poisoned_tool_active(session_id: str) -> bool:
+    return tool_integrity.poisoned_tool_enabled() or session_id in _poisoned_tool_sessions
+
 
 async def _broadcast(event: dict):
     for q in list(_subscribers):
@@ -93,7 +102,7 @@ async def list_tools(session_id: str):
     ]
 
     candidate_tools = real_tools + canary.CANARY_TOOLS
-    if tool_integrity.poisoned_tool_enabled():
+    if _poisoned_tool_active(session_id):
         candidate_tools = candidate_tools + [tool_integrity.POISONED_TOOL]
 
     # Tool-integrity check (Scenario 7): scan each tool's metadata BEFORE the
@@ -191,7 +200,7 @@ async def call_tool(request: Request):
     # description must never execute, even if the caller supplies its name
     # directly. This is a DIFFERENT layer from canary/policy/network/behavior.
     if tool_name in _quarantined_tools or (
-        tool_integrity.poisoned_tool_enabled() and tool_name in tool_integrity.POISONED_TOOL_NAMES
+        _poisoned_tool_active(session_id) and tool_name in tool_integrity.POISONED_TOOL_NAMES
     ):
         reason = tool_integrity.quarantine_reason(tool_name)
         checks.append({"layer": "Tool Integrity", "verdict": "block"})
@@ -422,6 +431,10 @@ async def run_agent_endpoint(request: Request):
         "status": "running", "task": task, "model": model, "error": None, "response": None,
         "started_at": time.time(),
     }
+    # Scenario 7: attach the poisoned-tool fixture to this session's MCP tool
+    # list. Tripwire's tool-integrity scan still has to find and quarantine it.
+    if body.get("poisoned_tool"):
+        _poisoned_tool_sessions.add(session_id)
     await _emit(session_id, "session_started", None, None,
                 log_arguments={"model": model, "max_steps": max_steps},
                 model=model, max_steps=max_steps)
