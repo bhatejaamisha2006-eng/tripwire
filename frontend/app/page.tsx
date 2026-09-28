@@ -3,6 +3,7 @@
 import * as React from "react";
 import {
   API_BASE,
+  API_CONFIGURED,
   RawEvent,
   DisplayEvent,
   Scenario,
@@ -83,6 +84,11 @@ export default function Page() {
 
   // Backend health: liveness, the S7 flag, and whether an access code is needed.
   React.useEffect(() => {
+    if (!API_CONFIGURED) {
+      setHealth({ online: false, poisonedTool: false, accessKeyRequired: false });
+      setError("Backend URL is not configured (NEXT_PUBLIC_TRIPWIRE_API).");
+      return;
+    }
     let alive = true;
     const check = async () => {
       try {
@@ -132,6 +138,7 @@ export default function Page() {
   // One long-lived SSE subscription. The server replays recent persisted
   // history on every (re)connect; event_id makes replays idempotent.
   React.useEffect(() => {
+    if (!API_CONFIGURED) return;
     const es = new EventSource(`${API_BASE}/dashboard/stream`);
     es.onopen = () => setStreamUp(true);
     es.onerror = () => setStreamUp(false); // the browser reconnects on its own
@@ -167,7 +174,7 @@ export default function Page() {
   };
 
   const runAgent = async () => {
-    if (!task.trim() || runState === "running") return;
+    if (!task.trim() || runState === "running" || !API_CONFIGURED) return;
     stopPolling();
     sessionRef.current = null;
     setEvents([]);

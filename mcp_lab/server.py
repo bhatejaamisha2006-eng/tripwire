@@ -44,6 +44,7 @@ def search_files(query: str) -> str:
     if not query_clean:
         return json.dumps({"error": "Query parameter cannot be empty."})
 
+    terms = query_clean.split()
     matches = []
     for root, _, files in os.walk(DEMO_WORKSPACE):
         for file in sorted(files):
@@ -58,11 +59,20 @@ def search_files(query: str) -> str:
             else:
                 try:
                     content = full_path.read_text(encoding="utf-8", errors="ignore")
-                    if query_clean in content.lower():
+                    haystack = content.lower()
+                    # Exact phrase first; otherwise every word of a multi-word
+                    # query must appear (in the path or the content), as in a
+                    # normal search tool. Single-word queries are unchanged.
+                    anchor = None
+                    if query_clean in haystack:
+                        anchor = query_clean
+                    elif len(terms) > 1 and all(t in haystack or t in rel_path.lower() for t in terms):
+                        anchor = next((t for t in terms if t in haystack), terms[0])
+                    if anchor is not None:
                         matched = True
-                        idx = content.lower().find(query_clean)
+                        idx = max(0, haystack.find(anchor))
                         start = max(0, idx - 40)
-                        end = min(len(content), idx + len(query_clean) + 40)
+                        end = min(len(content), idx + len(anchor) + 40)
                         snippet = "..." + content[start:end].replace("\n", " ").strip() + "..."
                 except Exception:
                     pass

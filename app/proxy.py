@@ -45,13 +45,25 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Tripwire", lifespan=lifespan)
 
-# Allow the Next.js judge UI (a separate origin, e.g. localhost:3000) to POST a
-# task and open the SSE stream. Local demo tool — no credentials involved.
+def cors_origins() -> list[str]:
+    """Origins allowed to call the API from a browser.
+
+    TRIPWIRE_ALLOWED_ORIGINS is a comma-separated list (e.g. the deployed
+    Vercel URL). Unset, any origin is allowed, so local development
+    (localhost:3000/3001) keeps working without configuration."""
+    configured = os.environ.get("TRIPWIRE_ALLOWED_ORIGINS", "")
+    origins = [o.strip().rstrip("/") for o in configured.split(",") if o.strip()]
+    return origins or ["*"]
+
+
+# The judge UI is a separate origin: it POSTs /run, polls /run/status, reads
+# /healthz and opens the /dashboard/stream SSE. Only those methods and the
+# access-code header are needed.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=cors_origins(),
+    allow_methods=["GET", "POST"],
+    allow_headers=["content-type", "x-tripwire-key"],
 )
 
 # Tracks agent runs launched via POST /run so the UI can show run status.

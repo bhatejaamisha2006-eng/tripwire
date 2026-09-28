@@ -41,7 +41,8 @@ class TestAgentContextBudget(unittest.TestCase):
              mock.patch.object(agent_demo, "TripwireProxyClient", return_value=proxy):
             answer = agent_demo.run_agent("t", "m", "http://x", 3, think=False, num_ctx=12345)
         self.assertEqual(answer, "done")
-        self.assertEqual(llm.chat.call_args.kwargs["options"], {"num_ctx": 12345})
+        self.assertEqual(llm.chat.call_args.kwargs["options"],
+                         {"num_ctx": 12345, "temperature": agent_demo.DEFAULT_TEMPERATURE})
 
 
 class TestReasoningKeptOutOfHistory(unittest.TestCase):
@@ -58,6 +59,9 @@ class TestReasoningKeptOutOfHistory(unittest.TestCase):
                             prompt_eval_count=10, eval_count=5, total_duration=0),
             SimpleNamespace(message=SimpleNamespace(content="reasoning B…\n</think>\n\nAll healthy.", thinking=None, tool_calls=None),
                             prompt_eval_count=10, eval_count=5, total_duration=0),
+            # reply to the one completion check
+            SimpleNamespace(message=SimpleNamespace(content="reasoning C…\n</think>\n\nAll healthy.", thinking=None, tool_calls=None),
+                            prompt_eval_count=10, eval_count=5, total_duration=0),
         ]
         seen = []
         llm = mock.MagicMock()
@@ -73,6 +77,63 @@ class TestReasoningKeptOutOfHistory(unittest.TestCase):
         self.assertEqual(answer, "All healthy.")
         history_text = " ".join(str(x) for x in seen[1])
         self.assertNotIn("reasoning A", history_text)  # 2nd request carries no past reasoning
+
+
+class TestCorsConfiguration(unittest.TestCase):
+    def test_unset_allows_any_origin_for_local_dev(self):
+        from app import proxy
+        with mock.patch.dict("os.environ", {"TRIPWIRE_ALLOWED_ORIGINS": ""}):
+            self.assertEqual(proxy.cors_origins(), ["*"])
+
+    def test_configured_origins_are_parsed(self):
+        from app import proxy
+        env = {"TRIPWIRE_ALLOWED_ORIGINS": " https://tripwire.vercel.app/ ,http://localhost:3000"}
+        with mock.patch.dict("os.environ", env):
+            self.assertEqual(proxy.cors_origins(), ["https://tripwire.vercel.app", "http://localhost:3000"])
+
+    def test_preflight_allows_the_access_code_header(self):
+        client = TestClient(app)
+        resp = client.options("/run", headers={
+            "Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-tripwire-key"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("x-tripwire-key", resp.headers.get("access-control-allow-headers", ""))
+
+
+class TestCompletionCheck(unittest.TestCase):
+    def _run(self, turns):
+        llm = mock.MagicMock()
+        sent = []
+        llm.chat.side_effect = lambda **kw: (sent.append(list(kw["messages"])), turns.pop(0))[1]
+        proxy = mock.MagicMock()
+        proxy.create_session.return_value = "s1"
+        proxy.list_tools.return_value = []
+        proxy.call_tool.return_value = (200, {"result": {"result": "ok"}})
+        proxy.get_trail.return_value = []
+        with mock.patch.object(agent_demo.ollama, "Client", return_value=llm), \
+             mock.patch.object(agent_demo, "TripwireProxyClient", return_value=proxy):
+            answer = agent_demo.run_agent("t", "m", "http://x", 6, think=False)
+        return answer, proxy, sent
+
+    @staticmethod
+    def _turn(content, calls=None):
+        return SimpleNamespace(message=SimpleNamespace(content=content, thinking=None, tool_calls=calls),
+                               prompt_eval_count=1, eval_count=1, total_duration=0)
+
+    def test_announced_action_is_followed_through(self):
+        call = SimpleNamespace(function=SimpleNamespace(name="send_http_request", arguments={"url": "u"}))
+        turns = [self._turn("I will now send the summary."), self._turn("", [call]), self._turn("Sent.")]
+        answer, proxy, sent = self._run(turns)
+        self.assertEqual(answer, "Sent.")
+        proxy.call_tool.assert_called_once_with("send_http_request", {"url": "u"})
+        self.assertEqual(sent[1][-1], {"role": "user", "content": agent_demo.COMPLETION_CHECK})
+
+    def test_check_happens_only_once(self):
+        turns = [self._turn("Done."), self._turn("Done, final report.")]
+        answer, proxy, sent = self._run(turns)
+        self.assertEqual(answer, "Done, final report.")
+        self.assertEqual(len(sent), 2)
+        proxy.call_tool.assert_not_called()
 
 
 class TestToolResultText(unittest.TestCase):
