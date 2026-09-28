@@ -68,6 +68,11 @@ export default function Page() {
   const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   const idRef = React.useRef(0);
   const sessionRef = React.useRef<string | null>(null);
+  // Reconnect de-dup: the SSE stream replays recent history on every (re)connect,
+  // so on a reconnect we skip this session's already-shown events.
+  const openCountRef = React.useRef(0);
+  const skipRef = React.useRef(0);
+  const seenCountRef = React.useRef(0);
 
   const cleanup = React.useCallback(() => {
     esRef.current?.close();
@@ -87,6 +92,9 @@ export default function Page() {
     setAgentResponse(null);
     setRunState("running");
     idRef.current = 0;
+    openCountRef.current = 0;
+    skipRef.current = 0;
+    seenCountRef.current = 0;
     try {
       const res = await fetch(`${API_BASE}/run`, {
         method: "POST",
@@ -101,17 +109,28 @@ export default function Page() {
 
       // Live events: reuse the EXISTING global SSE stream, filtered to this run.
       const es = new EventSource(`${API_BASE}/dashboard/stream`);
+      es.onopen = () => {
+        openCountRef.current += 1;
+        // On a reconnect, the server replays this session's history; skip the
+        // events we have already displayed so they are not shown twice.
+        if (openCountRef.current > 1) skipRef.current = seenCountRef.current;
+      };
       es.addEventListener("tripwire", (ev: MessageEvent) => {
         try {
           const raw: RawEvent = JSON.parse(ev.data);
           if (raw.session_id !== sessionRef.current) return; // only this run
+          if (skipRef.current > 0) {
+            skipRef.current -= 1; // a replayed event we already have
+            return;
+          }
+          seenCountRef.current += 1;
           setEvents((prev) => [...prev, normalize(raw, idRef.current++)]);
         } catch {
           /* ignore malformed frame */
         }
       });
       es.onerror = () => {
-        /* browser auto-reconnects; nothing to do */
+        /* browser auto-reconnects; onopen will re-fire and de-dup */
       };
       esRef.current = es;
 
